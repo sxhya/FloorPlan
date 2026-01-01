@@ -4,7 +4,6 @@ import model.Door
 import model.PlanElement
 import model.Window as PlanWindow
 import ui.FloorPlanApp
-import java.awt.Dimension
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.JLabel
@@ -35,8 +34,9 @@ class ElementStatisticsPanel(private val app: FloorPlanApp) : JPanel() {
         areaLabel.text = "Element Area: %.2f m²".format(el.getArea() / 10000.0)
 
         if (el is PlanWindow || el is Door) {
-            val h3d = if (el is PlanWindow) el.height3D else (el as Door).height3D
-            val wall = app.findContainingWall(el.x, el.y, el.width, el.height)
+            val h3d = if (el is PlanWindow) el.height3D else (el as Door).verticalHeight
+            val doc = app.activeDocument
+            val wall = doc?.findContainingWall(el.x, el.y, el.width, el.height)
             val effectiveWidth = if (wall != null) {
                 val isVertical = wall.width < wall.height
                 if (isVertical) el.height else el.width

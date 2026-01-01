@@ -6,6 +6,7 @@ import javax.swing.SwingUtilities
 fun main() {
     System.setProperty("apple.laf.useScreenMenuBar", "true")
     SwingUtilities.invokeLater {
-        FloorPlanApp()
+        val app = FloorPlanApp()
+        // No need to create a window here, FloorPlanApp's init creates the first document window
     }
 }

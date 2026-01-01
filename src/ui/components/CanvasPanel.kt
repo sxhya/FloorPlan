@@ -2,7 +2,7 @@ package ui.components
 
 import model.*
 import model.Window as PlanWindow
-import ui.FloorPlanApp
+import ui.FloorPlanDocument
 import java.awt.*
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -10,7 +10,7 @@ import java.awt.image.BufferedImage
 import javax.swing.*
 import kotlin.math.*
 
-class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
+class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         private var dragStart: Point? = null
         private var initialElementBounds: Rectangle? = null
         private var initialVertices: List<Point>? = null
@@ -36,16 +36,17 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
         var isCreatingFloorOpening = false
 
         private var vertexBeingDraggedIndex = -1
+        private var hasChangedDuringInteraction = false
 
         private fun getHandleUnderMouse(p: Point): Any {
-            val el = app.selectedElement ?: return ResizeHandle.NONE
+            val el = doc.selectedElement ?: return ResizeHandle.NONE
             
             if (el is FloorOpening) {
                 val r = HANDLE_SIZE
                 for (i in el.vertices.indices) {
                     val v = el.vertices[i]
-                    val sx = app.modelToScreen(v.x.toDouble(), app.offsetX)
-                    val sy = app.modelToScreen(v.y.toDouble(), app.offsetY)
+                    val sx = doc.modelToScreen(v.x.toDouble(), doc.offsetX)
+                    val sy = doc.modelToScreen(v.y.toDouble(), doc.offsetY)
                     if (Rectangle(sx - r, sy - r, 2 * r, 2 * r).contains(p)) {
                         return i
                     }
@@ -53,10 +54,10 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 return ResizeHandle.NONE
             }
 
-            val sx = app.modelToScreen(el.x.toDouble(), app.offsetX)
-            val sy = app.modelToScreen(el.y.toDouble(), app.offsetY)
-            val sw = app.modelToScreen((el.x + el.width).toDouble(), app.offsetX) - sx
-            val sh = app.modelToScreen((el.y + el.height).toDouble(), app.offsetY) - sy
+            val sx = doc.modelToScreen(el.x.toDouble(), doc.offsetX)
+            val sy = doc.modelToScreen(el.y.toDouble(), doc.offsetY)
+            val sw = doc.modelToScreen((el.x + el.width).toDouble(), doc.offsetX) - sx
+            val sh = doc.modelToScreen((el.y + el.height).toDouble(), doc.offsetY) - sy
 
             val r = HANDLE_SIZE
             val rects = mapOf(
@@ -81,7 +82,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             background = Color.WHITE
             val mouseAdapter = object : MouseAdapter() {
                 override fun mouseMoved(e: MouseEvent) {
-                    if (app.currentMode == AppMode.NORMAL) {
+                    if (doc.currentMode == AppMode.NORMAL) {
                         val handle = getHandleUnderMouse(e.point)
                         cursor = when (handle) {
                             ResizeHandle.NW -> Cursor.getPredefinedCursor(Cursor.NW_RESIZE_CURSOR)
@@ -95,16 +96,16 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                             is Int -> Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR)
                             else -> Cursor.getDefaultCursor()
                         }
-                    } else if (app.currentMode == AppMode.RULER) {
+                    } else if (doc.currentMode == AppMode.RULER) {
                         if (rulerProbeEnabled) {
-                            rulerProbePoint = Point(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+                            rulerProbePoint = Point(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                             repaint()
                         }
                     }
                 }
 
                 override fun mouseExited(e: MouseEvent) {
-                    if (app.currentMode == AppMode.RULER) {
+                    if (doc.currentMode == AppMode.RULER) {
                         rulerProbePoint = null
                         repaint()
                     }
@@ -113,25 +114,26 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
 
                 override fun mousePressed(e: MouseEvent) {
                     requestFocusInWindow()
-                    if (e.isPopupTrigger && app.currentMode == AppMode.NORMAL) {
+                    hasChangedDuringInteraction = false
+                    if (e.isPopupTrigger && doc.currentMode == AppMode.NORMAL) {
                         showPopup(e)
                         return
                     }
-                    if (app.currentMode == AppMode.DRAG) {
+                    if (doc.currentMode == AppMode.DRAG) {
                         panStart = e.point
-                        initialOffsetX = app.offsetX
-                        initialOffsetY = app.offsetY
+                        initialOffsetX = doc.offsetX
+                        initialOffsetY = doc.offsetY
                         return
                     }
 
-                    if (app.currentMode == AppMode.RULER) {
+                    if (doc.currentMode == AppMode.RULER) {
                         if (SwingUtilities.isRightMouseButton(e)) {
                             rulerMarkers.clear()
                             rulerClosed = false
                             rulerProbeEnabled = true
                             isCreatingFloorOpening = false
-                            app.currentMode = AppMode.NORMAL
-                            app.normalBtn.isSelected = true
+                            doc.currentMode = AppMode.NORMAL
+                            doc.window!!.normalBtn.isSelected = true
                         } else if (SwingUtilities.isLeftMouseButton(e)) {
                             if (e.clickCount == 2) {
                                 if (rulerMarkers.size == 1) {
@@ -143,21 +145,21 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     rulerProbePoint = null
                                 } else if (rulerMarkers.size > 2) {
                                     if (isCreatingFloorOpening) {
-                                        val room = app.selectedElement as? Room
+                                        val room = doc.selectedElement as? Room
                                         val newES = FloorOpening(rulerMarkers.toMutableList())
-                                        app.elements.add(newES)
-                                        app.saveState()
-                                        app.selectedElement = newES
+                                        doc.saveState()
+                                        doc.elements.add(newES)
+                                        doc.selectedElement = newES
                                         rulerMarkers.clear()
                                         rulerClosed = false
                                         rulerProbeEnabled = true
                                         rulerProbePoint = null
                                         isCreatingFloorOpening = false
-                                        app.currentMode = AppMode.NORMAL
-                                        app.normalBtn.isSelected = true
-                                        app.canvas.cursor = Cursor.getDefaultCursor()
-                                        app.sidePanel.updateFields(newES)
-                                        app.statsPanel.update()
+                                        doc.currentMode = AppMode.NORMAL
+                                        doc.window!!.normalBtn.isSelected = true
+                                        doc.canvas.cursor = Cursor.getDefaultCursor()
+                                        doc.app.sidePanel.updateFields(newES)
+                                        doc.app.statsPanel.update()
                                     } else {
                                         rulerClosed = true
                                         rulerProbeEnabled = false
@@ -170,7 +172,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     rulerClosed = false
                                     rulerProbeEnabled = true
                                 }
-                                val newPoint = Point(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+                                val newPoint = Point(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                                 // Only add if not already the last point (avoid duplicate from double click first click)
                                 if (rulerMarkers.isEmpty() || rulerMarkers.last() != newPoint) {
                                     rulerMarkers.add(newPoint)
@@ -182,44 +184,44 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                     }
 
                     // Check if origin is clicked
-                    val ox = app.modelToScreen(0.0, app.offsetX)
-                    val oy = app.modelToScreen(0.0, app.offsetY)
+                    val ox = doc.modelToScreen(0.0, doc.offsetX)
+                    val oy = doc.modelToScreen(0.0, doc.offsetY)
                     if (Rectangle(ox - 10, oy - 10, 20, 20).contains(e.point)) {
                         draggingOrigin = true
                         originDragStart = e.point
-                        initialOffsetX = app.offsetX
-                        initialOffsetY = app.offsetY
-                        initialElementsPositions = app.elements.map { Point(it.x, it.y) }
+                        initialOffsetX = doc.offsetX
+                        initialOffsetY = doc.offsetY
+                        initialElementsPositions = doc.elements.map { Point(it.x, it.y) }
                         return
                     }
 
                     activeHandle = getHandleUnderMouse(e.point)
                     if (activeHandle != ResizeHandle.NONE) {
                         dragStart = e.point
-                        val el = app.selectedElement!!
+                        val el = doc.selectedElement!!
                         initialElementBounds = Rectangle(el.x, el.y, el.width, el.height)
                         return
                     }
 
-                    app.selectedElement = app.elements.reversed().find { 
-                        it.contains(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+                    doc.selectedElement = doc.elements.reversed().find { 
+                        it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                     }
-                    if (app.selectedElement != null) {
+                    if (doc.selectedElement != null) {
                         dragStart = e.point
-                        val el = app.selectedElement!!
-                        app.elementStatsPanel.updateElementStats(el)
+                        val el = doc.selectedElement!!
+                        doc.app.elementStatsPanel.updateElementStats(el)
                         initialElementBounds = Rectangle(el.x, el.y, el.width, el.height)
                         if (el is FloorOpening) {
                             initialVertices = el.vertices.map { Point(it.x, it.y) }
                         } else {
                             initialVertices = null
                         }
-                        app.sidePanel.updateFields(app.selectedElement!!)
+                        doc.app.sidePanel.updateFields(doc.selectedElement!!)
 
                         elementsToMoveWithWall.clear()
                         initialChildrenVertices.clear()
                         if (el is Wall || el is Room) {
-                            app.elements.forEach { other ->
+                            doc.elements.forEach { other ->
                                 if (other is PlanWindow || other is Door || other is Stairs || other is FloorOpening) {
                                     if (el.getBounds().contains(other.getBounds())) {
                                         elementsToMoveWithWall.add(other to Point(other.x - el.x, other.y - el.y))
@@ -234,37 +236,44 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                             showPopup(e)
                         }
                     } else {
-                        app.selectedElement = null
-                        app.elementStatsPanel.updateElementStats(null)
-                        app.sidePanel.clearFields()
+                        doc.selectedElement = null
+                        doc.app.elementStatsPanel.updateElementStats(null)
+                        doc.app.sidePanel.clearFields()
                         if (e.isPopupTrigger) {
                             showPopup(e)
                         } else {
                             panStart = e.point
-                            initialOffsetX = app.offsetX
-                            initialOffsetY = app.offsetY
+                            initialOffsetX = doc.offsetX
+                            initialOffsetY = doc.offsetY
                         }
                     }
                     repaint()
                 }
 
                 override fun mouseDragged(e: MouseEvent) {
-                    if (app.currentMode == AppMode.DRAG) {
+                    fun ensureStateSaved() {
+                        if (!hasChangedDuringInteraction) {
+                            doc.saveState()
+                            hasChangedDuringInteraction = true
+                        }
+                    }
+                    
+                    if (doc.currentMode == AppMode.DRAG) {
                         val pStart = panStart
                         val initOX = initialOffsetX
                         val initOY = initialOffsetY
                         if (pStart != null && initOX != null && initOY != null) {
-                            val dx = app.screenToModel(e.x, 0.0) - app.screenToModel(pStart.x, 0.0)
-                            val dy = app.screenToModel(e.y, 0.0) - app.screenToModel(pStart.y, 0.0)
-                            app.offsetX = initOX + dx
-                            app.offsetY = initOY + dy
+                            val dx = doc.screenToModel(e.x, 0.0) - doc.screenToModel(pStart.x, 0.0)
+                            val dy = doc.screenToModel(e.y, 0.0) - doc.screenToModel(pStart.y, 0.0)
+                            doc.offsetX = initOX + dx
+                            doc.offsetY = initOY + dy
                         }
                         repaint()
                         return
                     }
 
-                    if (app.currentMode == AppMode.RULER) {
-                        rulerProbePoint = Point(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+                    if (doc.currentMode == AppMode.RULER) {
+                        rulerProbePoint = Point(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                         repaint()
                         return
                     }
@@ -277,19 +286,24 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                         if (start != null && initOX != null && initOY != null && initPos != null) {
                             val dxScreen = e.x - start.x
                             val dyScreen = e.y - start.y
-                            val dxModel = dxScreen / (app.scale * app.pixelsPerCm)
-                            val dyModel = dyScreen / (app.scale * app.pixelsPerCm)
+                            val dxModel = dxScreen / (doc.scale * doc.pixelsPerCm)
+                            val dyModel = dyScreen / (doc.scale * doc.pixelsPerCm)
                             
-                            app.offsetX = initOX + dxModel
-                            app.offsetY = initOY + dyModel
+                            doc.offsetX = initOX + dxModel
+                            doc.offsetY = initOY + dyModel
                             
-                            app.elements.forEachIndexed { index, el ->
+                            doc.elements.forEachIndexed { index, el ->
                                 val initial = initPos[index]
-                                el.x = (initial.x - dxModel).roundToInt()
-                                el.y = (initial.y - dyModel).roundToInt()
+                                val newX = (initial.x - dxModel).roundToInt()
+                                val newY = (initial.y - dyModel).roundToInt()
+                                if (el.x != newX || el.y != newY) {
+                                    ensureStateSaved()
+                                    el.x = newX
+                                    el.y = newY
+                                }
                             }
-                            app.selectedElement?.let { app.sidePanel.updateFields(it) }
-                            app.statsPanel.update()
+                            doc.selectedElement?.let { doc.app.sidePanel.updateFields(it) }
+                            doc.app.statsPanel.update()
                         }
                         repaint()
                         return
@@ -297,19 +311,19 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
 
                     val start = dragStart
                     val initial = initialElementBounds
-                    val element = app.selectedElement
+                    val element = doc.selectedElement
 
                     if (element != null && start != null && initial != null) {
-                        val dx = (app.screenToModel(e.x, 0.0) - app.screenToModel(start.x, 0.0)).roundToInt()
-                        val dy = (app.screenToModel(e.y, 0.0) - app.screenToModel(start.y, 0.0)).roundToInt()
+                        val dx = (doc.screenToModel(e.x, 0.0) - doc.screenToModel(start.x, 0.0)).roundToInt()
+                        val dy = (doc.screenToModel(e.y, 0.0) - doc.screenToModel(start.y, 0.0)).roundToInt()
                         
                         // dx and dy are in model cm
 
                         if (activeHandle != ResizeHandle.NONE) {
                                 if (activeHandle is Int && element is FloorOpening) {
                                     val idx = activeHandle as Int
-                                    val mx = app.screenToModel(e.point.x, app.offsetX).roundToInt()
-                                    val my = app.screenToModel(e.point.y, app.offsetY).roundToInt()
+                                    val mx = doc.screenToModel(e.point.x, doc.offsetX).roundToInt()
+                                    val my = doc.screenToModel(e.point.y, doc.offsetY).roundToInt()
                                     
                                     // Sticky edges for polygon vertices
                                     val sx_sticky = getStickyCoord(mx, 0, true)
@@ -318,20 +332,23 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     val oldX = element.vertices[idx].x
                                     val oldY = element.vertices[idx].y
                                     
-                                    element.vertices[idx].x = sx_sticky
-                                    element.vertices[idx].y = sy_sticky
-                                    element.updateBounds()
+                                    if (element.vertices[idx].x != sx_sticky || element.vertices[idx].y != sy_sticky) {
+                                        ensureStateSaved()
+                                        element.vertices[idx].x = sx_sticky
+                                        element.vertices[idx].y = sy_sticky
+                                        element.updateBounds()
+                                    }
                                     
-                                    if (app.findContainingRoomForFloorOpening(element) == null) {
+                                    if (doc.findContainingRoomForFloorOpening(element) == null) {
                                         // Try move only X
                                         element.vertices[idx].y = oldY
                                         element.updateBounds()
-                                        if (app.findContainingRoomForFloorOpening(element) == null) {
+                                        if (doc.findContainingRoomForFloorOpening(element) == null) {
                                             // Try move only Y
                                             element.vertices[idx].x = oldX
                                             element.vertices[idx].y = sy_sticky
                                             element.updateBounds()
-                                            if (app.findContainingRoomForFloorOpening(element) == null) {
+                                            if (doc.findContainingRoomForFloorOpening(element) == null) {
                                                 // Snap back fully
                                                 element.vertices[idx].y = oldY
                                                 element.updateBounds()
@@ -399,16 +416,19 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
 
                                 // Constraints for Window and Door (must be inside a Wall)
                                 if (element is PlanWindow || element is Door) {
-                                    val wall = app.findContainingWall(newX, newY, newW, newH)
+                                    val wall = doc.findContainingWall(newX, newY, newW, newH)
                                     if (wall != null) {
-                                        element.x = newX
-                                        element.y = newY
-                                        element.width = newW
-                                        element.height = newH
+                                        if (element.x != newX || element.y != newY || element.width != newW || element.height != newH) {
+                                            ensureStateSaved()
+                                            element.x = newX
+                                            element.y = newY
+                                            element.width = newW
+                                            element.height = newH
+                                        }
                                     }
                                 } else if (element is Stairs || element is FloorOpening) {
                                     val room = if (element is Stairs) {
-                                        app.findContainingRoom(newX, newY, newW, newH)
+                                        doc.findContainingRoom(newX, newY, newW, newH)
                                     } else {
                                         // For FloorOpening, standard rectangular resize handle dragging isn't implemented 
                                         // (only vertex dragging via Int handle).
@@ -417,16 +437,22 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     }
                                     
                                     if (element is Stairs && room != null) {
+                                        if (element.x != newX || element.y != newY || element.width != newW || element.height != newH) {
+                                            ensureStateSaved()
+                                            element.x = newX
+                                            element.y = newY
+                                            element.width = newW
+                                            element.height = newH
+                                        }
+                                    }
+                                } else {
+                                    if (element.x != newX || element.y != newY || element.width != newW || element.height != newH) {
+                                        ensureStateSaved()
                                         element.x = newX
                                         element.y = newY
                                         element.width = newW
                                         element.height = newH
                                     }
-                                } else {
-                                    element.x = newX
-                                    element.y = newY
-                                    element.width = newW
-                                    element.height = newH
 
                                     if (element is Wall || element is Room) {
                                     val dx_move = element.x - initial.x
@@ -437,8 +463,13 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     elementsToMoveWithWall.forEach { (child, offset) ->
                                         val oldX = child.x
                                         val oldY = child.y
-                                        child.x = element.x + offset.x
-                                        child.y = element.y + offset.y
+                                        val targetX = element.x + offset.x
+                                        val targetY = element.y + offset.y
+                                        if (child.x != targetX || child.y != targetY) {
+                                            ensureStateSaved()
+                                            child.x = targetX
+                                            child.y = targetY
+                                        }
                                         
                                         if (element is Wall && (child is PlanWindow || child is Door)) {
                                             if (!element.getBounds().contains(child.getBounds())) {
@@ -454,11 +485,20 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     initialChildrenVertices.forEach { (es, vertices) ->
                                         val dx_v = element.x - initial.x
                                         val dy_v = element.y - initial.y
-                                        es.vertices.clear()
-                                        vertices.forEach { v ->
-                                            es.vertices.add(Point(v.x + dx_v, v.y + dy_v))
+                                        var vChanged = false
+                                        vertices.forEachIndexed { idx_v, v ->
+                                            val targetX = v.x + dx_v
+                                            val targetY = v.y + dy_v
+                                            if (es.vertices[idx_v].x != targetX || es.vertices[idx_v].y != targetY) {
+                                                ensureStateSaved()
+                                                es.vertices[idx_v].x = targetX
+                                                es.vertices[idx_v].y = targetY
+                                                vChanged = true
+                                            }
                                         }
-                                        es.updateBounds()
+                                        if (vChanged) {
+                                            es.updateBounds()
+                                        }
                                         
                                         if (element is Room) {
                                             if (!element.getBounds().contains(es.getBounds())) {
@@ -475,20 +515,26 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                         // Actually, the previous implementation for Wall DID remove them in some cases?
                                         // Let's look at what was there.
                                     }
-
+                                    
                                     if (element is Wall) {
                                             val isVertical = element.width < element.height
                                             val thickness = if (isVertical) element.width else element.height
                                             
-                                            // Update all app.elements that WERE inside the wall
+                                            // Update all doc.elements that WERE inside the wall
                                             elementsToMoveWithWall.forEach { (child, offset) ->
                                                 if (child is PlanWindow || child is Door) {
                                                     if (isVertical) {
-                                                        child.width = thickness
-                                                        child.x = element.x
+                                                        if (child.width != thickness || child.x != element.x) {
+                                                            ensureStateSaved()
+                                                            child.width = thickness
+                                                            child.x = element.x
+                                                        }
                                                     } else {
-                                                        child.height = thickness
-                                                        child.y = element.y
+                                                        if (child.height != thickness || child.y != element.y) {
+                                                            ensureStateSaved()
+                                                            child.height = thickness
+                                                            child.y = element.y
+                                                        }
                                                     }
                                                 }
                                             }
@@ -504,17 +550,20 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                             newX = getStickyCoord(newX, element.width, true)
                             newY = getStickyCoord(newY, element.height, false)
 
+                            val oldX = element.x
+                            val oldY = element.y
+
                             // Constraints for Window and Door (must be inside a Wall)
                             if (element is PlanWindow || element is Door) {
-                                val wall = app.findContainingWall(newX, newY, element.width, element.height)
+                                val wall = doc.findContainingWall(newX, newY, element.width, element.height)
                                 if (wall != null) {
                                     element.x = newX
                                     element.y = newY
                                 } else {
-                                    val currentWall = app.findContainingWall(element.x, element.y, element.width, element.height)
+                                    val currentWall = doc.findContainingWall(element.x, element.y, element.width, element.height)
                                     if (currentWall != null) {
                                         var adjusted = false
-                                        val movedXInside = app.findContainingWall(newX, element.y, element.width, element.height)
+                                        val movedXInside = doc.findContainingWall(newX, element.y, element.width, element.height)
                                         if (movedXInside != null) {
                                             element.x = newX
                                             adjusted = true
@@ -525,7 +574,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                             // Adjusted is false because we didn't fully move to newX
                                         }
                                         
-                                        val movedYInside = app.findContainingWall(element.x, newY, element.width, element.height)
+                                        val movedYInside = doc.findContainingWall(element.x, newY, element.width, element.height)
                                         if (movedYInside != null) {
                                             element.y = newY
                                             adjusted = true
@@ -536,11 +585,11 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                         }
                                         
                                         // Adjust dragStart to avoid "delay" when moving back
-                                        // We want: app.screenToModel(e.x) - app.screenToModel(dragStart.x) == element.x - initial.x
-                                        // So: app.screenToModel(dragStart.x) = app.screenToModel(e.x) - (element.x - initial.x)
-                                        val modelDragStartX = app.screenToModel(e.x, 0.0) - (element.x - initial.x)
-                                        val modelDragStartY = app.screenToModel(e.y, 0.0) - (element.y - initial.y)
-                                        dragStart = Point(app.modelToScreen(modelDragStartX, 0.0), app.modelToScreen(modelDragStartY, 0.0))
+                                        // We want: doc.screenToModel(e.x) - doc.screenToModel(dragStart.x) == element.x - initial.x
+                                        // So: doc.screenToModel(dragStart.x) = doc.screenToModel(e.x) - (element.x - initial.x)
+                                        val modelDragStartX = doc.screenToModel(e.x, 0.0) - (element.x - initial.x)
+                                        val modelDragStartY = doc.screenToModel(e.y, 0.0) - (element.y - initial.y)
+                                        dragStart = Point(doc.modelToScreen(modelDragStartX, 0.0), doc.modelToScreen(modelDragStartY, 0.0))
                                     }
                                 }
                             } else {
@@ -574,7 +623,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                     
                                     val tempVertices = initialVertices!!.map { Point(it.x + dx_m, it.y + dy_m) }.toMutableList()
                                     val tempES = FloorOpening(tempVertices)
-                                    if (app.findContainingRoomForFloorOpening(tempES) != null) {
+                                    if (doc.findContainingRoomForFloorOpening(tempES) != null) {
                                         element.vertices.clear()
                                         element.vertices.addAll(tempVertices)
                                         element.x = newX
@@ -585,28 +634,28 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                 
                                 // Constraints for EmptySpace and Stairs (must be inside a Room)
                                     if (element is Stairs) {
-                                        val room = app.findContainingRoom(newX, newY, element.width, element.height)
+                                        val room = doc.findContainingRoom(newX, newY, element.width, element.height)
                                         if (room != null) {
                                             element.x = newX
                                             element.y = newY
                                         } else {
-                                            val currentRoom = app.findContainingRoom(element.x, element.y, element.width, element.height)
+                                            val currentRoom = doc.findContainingRoom(element.x, element.y, element.width, element.height)
                                             if (currentRoom != null) {
-                                                if (app.findContainingRoom(newX, element.y, element.width, element.height) != null) {
+                                                if (doc.findContainingRoom(newX, element.y, element.width, element.height) != null) {
                                                     element.x = newX
                                                 } else {
                                                     if (newX < currentRoom.x) element.x = currentRoom.x
                                                     else if (newX + element.width > currentRoom.x + currentRoom.width) element.x = currentRoom.x + currentRoom.width - element.width
                                                 }
-                                                if (app.findContainingRoom(element.x, newY, element.width, element.height) != null) {
+                                                if (doc.findContainingRoom(element.x, newY, element.width, element.height) != null) {
                                                     element.y = newY
                                                 } else {
                                                     if (newY < currentRoom.y) element.y = currentRoom.y
                                                     else if (newY + element.height > currentRoom.y + currentRoom.height) element.y = currentRoom.y + currentRoom.height - element.height
                                                 }
-                                                val modelDragStartX = app.screenToModel(e.x, 0.0) - (element.x - initial.x)
-                                                val modelDragStartY = app.screenToModel(e.y, 0.0) - (element.y - initial.y)
-                                                dragStart = Point(app.modelToScreen(modelDragStartX, 0.0), app.modelToScreen(modelDragStartY, 0.0))
+                                                val modelDragStartX = doc.screenToModel(e.x, 0.0) - (element.x - initial.x)
+                                                val modelDragStartY = doc.screenToModel(e.y, 0.0) - (element.y - initial.y)
+                                                dragStart = Point(doc.modelToScreen(modelDragStartX, 0.0), doc.modelToScreen(modelDragStartY, 0.0))
                                             }
                                         }
                                     } else if (element is FloorOpening && initialVertices != null) {
@@ -615,7 +664,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                         
                                         val tempVertices = initialVertices!!.map { Point(it.x + dx_m, it.y + dy_m) }.toMutableList()
                                         val tempES = FloorOpening(tempVertices)
-                                        if (app.findContainingRoomForFloorOpening(tempES) != null) {
+                                        if (doc.findContainingRoomForFloorOpening(tempES) != null) {
                                             element.vertices.clear()
                                             element.vertices.addAll(tempVertices)
                                             element.x = newX
@@ -623,54 +672,61 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                                             element.updateBounds()
                                         } else {
                                             // Handle sticking for FloorOpening movement
-                                            val currentRoom = app.findContainingRoomForFloorOpening(element)
+                                            val currentRoom = doc.findContainingRoomForFloorOpening(element)
                                             if (currentRoom != null) {
                                                 // Try X move
                                                 val tempVerticesX = initialVertices!!.map { Point(it.x + dx_m, it.y + (element.y - initial.y)) }.toMutableList()
-                                                if (app.findContainingRoomForFloorOpening(FloorOpening(tempVerticesX)) != null) {
+                                                if (doc.findContainingRoomForFloorOpening(FloorOpening(tempVerticesX)) != null) {
                                                     element.vertices.clear()
                                                     element.vertices.addAll(tempVerticesX)
                                                     element.x = newX
                                                 }
                                                 // Try Y move
                                                 val tempVerticesY = initialVertices!!.map { Point(it.x + (element.x - initial.x), it.y + dy_m) }.toMutableList()
-                                                if (app.findContainingRoomForFloorOpening(FloorOpening(tempVerticesY)) != null) {
+                                                if (doc.findContainingRoomForFloorOpening(FloorOpening(tempVerticesY)) != null) {
                                                     element.vertices.clear()
                                                     element.vertices.addAll(tempVerticesY)
                                                     element.y = newY
                                                 }
                                                 element.updateBounds()
                                                 
-                                                val modelDragStartX = app.screenToModel(e.x, 0.0) - (element.x - initial.x)
-                                                val modelDragStartY = app.screenToModel(e.y, 0.0) - (element.y - initial.y)
-                                                dragStart = Point(app.modelToScreen(modelDragStartX, 0.0), app.modelToScreen(modelDragStartY, 0.0))
+                                                if (element.x != oldX || element.y != oldY) {
+                                                    ensureStateSaved()
+                                                }
+
+                                                val modelDragStartX = doc.screenToModel(e.x, 0.0) - (element.x - initial.x)
+                                                val modelDragStartY = doc.screenToModel(e.y, 0.0) - (element.y - initial.y)
+                                                dragStart = Point(doc.modelToScreen(modelDragStartX, 0.0), doc.modelToScreen(modelDragStartY, 0.0))
                                             }
                                         }
                                     }
+                                if (element.x != oldX || element.y != oldY) {
+                                    ensureStateSaved()
+                                }
                             }
                         }
 
-                        app.sidePanel.updateFields(element)
-                        app.statsPanel.update()
+                        doc.app.sidePanel.updateFields(element)
+                        doc.app.statsPanel.update()
                     } else {
                         val pStart = panStart
                         val initOX = initialOffsetX
                         val initOY = initialOffsetY
                         if (pStart != null && initOX != null && initOY != null) {
-                            val dx = app.screenToModel(e.x, 0.0) - app.screenToModel(pStart.x, 0.0)
-                            val dy = app.screenToModel(e.y, 0.0) - app.screenToModel(pStart.y, 0.0)
-                            app.offsetX = initOX + dx
-                            app.offsetY = initOY + dy
+                            val dx = doc.screenToModel(e.x, 0.0) - doc.screenToModel(pStart.x, 0.0)
+                            val dy = doc.screenToModel(e.y, 0.0) - doc.screenToModel(pStart.y, 0.0)
+                            doc.offsetX = initOX + dx
+                            doc.offsetY = initOY + dy
                         }
                     }
                     repaint()
                 }
 
                 override fun mouseReleased(e: MouseEvent) {
-                    if (dragStart != null || activeHandle != ResizeHandle.NONE || draggingOrigin) {
-                        app.saveState()
+                    if (hasChangedDuringInteraction) {
+                        doc.saveState()
                     }
-                    if (e.isPopupTrigger && app.currentMode == AppMode.NORMAL) {
+                    if (e.isPopupTrigger && doc.currentMode == AppMode.NORMAL) {
                         showPopup(e)
                     }
                     draggingOrigin = false
@@ -690,88 +746,88 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 val mousePos = e.point
                 
                 // Logical point under mouse before zoom
-                val mouseModelX = app.screenToModel(mousePos.x, app.offsetX)
-                val mouseModelY = app.screenToModel(mousePos.y, app.offsetY)
+                val mouseModelX = doc.screenToModel(mousePos.x, doc.offsetX)
+                val mouseModelY = doc.screenToModel(mousePos.y, doc.offsetY)
 
                 val rotation = e.preciseWheelRotation
                 val factor = 1.1.pow(-rotation)
-                app.scale = (app.scale * factor).coerceIn(app.MIN_SCALE, app.MAX_SCALE)
+                doc.scale = (doc.scale * factor).coerceIn(doc.MIN_SCALE, doc.MAX_SCALE)
         
                 // Adjust offsets to zoom towards mouse position
-                app.offsetX = mousePos.x / (app.scale * app.pixelsPerCm) - mouseModelX
-                app.offsetY = mousePos.y / (app.scale * app.pixelsPerCm) - mouseModelY
+                doc.offsetX = mousePos.x / (doc.scale * doc.pixelsPerCm) - mouseModelX
+                doc.offsetY = mousePos.y / (doc.scale * doc.pixelsPerCm) - mouseModelY
                 
-                app.updateScaleLabel()
+                doc.window!!.updateScaleLabel()
                 repaint()
             }
         }
 
         private fun showPopup(e: MouseEvent) {
             // Select element under mouse before showing popup
-            app.selectedElement = app.elements.reversed().find { 
-                it.contains(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+            doc.selectedElement = doc.elements.reversed().find { 
+                it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
             }
-            if (app.selectedElement != null) {
-                app.elementStatsPanel.updateElementStats(app.selectedElement)
-                app.sidePanel.updateFields(app.selectedElement!!)
+            if (doc.selectedElement != null) {
+                doc.app.elementStatsPanel.updateElementStats(doc.selectedElement)
+                doc.app.sidePanel.updateFields(doc.selectedElement!!)
             } else {
-                app.elementStatsPanel.updateElementStats(null)
-                app.sidePanel.clearFields()
+                doc.app.elementStatsPanel.updateElementStats(null)
+                doc.app.sidePanel.clearFields()
             }
-            app.canvas.repaint()
+            doc.canvas.repaint()
 
-            val hasSelection = app.selectedElement != null
-            val isWall = app.selectedElement is Wall
-            val isRoom = app.selectedElement is Room
+            val hasSelection = doc.selectedElement != null
+            val isWall = doc.selectedElement is Wall
+            val isRoom = doc.selectedElement is Room
 
             // If empty space: Add Wall, Add Room, Add Floor Opening
             // If selection: Duplicate, Remove, [Add Window/Door if Wall], [Add Stairs/Floor Opening if Room]
 
             if (!hasSelection) {
-                app.popAddWallMenu.isVisible = true
-                app.popAddRoomMenu.isVisible = true
+                doc.app.popAddWallMenu.isVisible = true
+                doc.app.popAddRoomMenu.isVisible = true
                 
                 // Only show "Add Floor Opening" if clicking over a room
-                val roomAtPoint = app.elements.reversed().filterIsInstance<Room>().find { 
-                    it.contains(app.screenToModel(e.x, app.offsetX).roundToInt(), app.screenToModel(e.y, app.offsetY).roundToInt())
+                val roomAtPoint = doc.elements.reversed().filterIsInstance<Room>().find { 
+                    it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                 }
-                app.popAddFloorOpeningMenu.isVisible = roomAtPoint != null
+                doc.app.popAddFloorOpeningMenu.isVisible = roomAtPoint != null
             
-                app.popSepGeneral.isVisible = false
-                app.popDuplicateMenu.isVisible = false
-                app.popRemoveMenu.isVisible = false
-                app.popSepElements.isVisible = false
-                app.popAddWindowMenu.isVisible = false
-                app.popAddDoorMenu.isVisible = false
-                app.popSepRoom.isVisible = false
-                app.popAddStairsMenu.isVisible = false
+                doc.app.popSepGeneral.isVisible = false
+                doc.app.popDuplicateMenu.isVisible = false
+                doc.app.popRemoveMenu.isVisible = false
+                doc.app.popSepElements.isVisible = false
+                doc.app.popAddWindowMenu.isVisible = false
+                doc.app.popAddDoorMenu.isVisible = false
+                doc.app.popSepRoom.isVisible = false
+                doc.app.popAddStairsMenu.isVisible = false
             } else {
-                app.popAddWallMenu.isVisible = false
-                app.popAddRoomMenu.isVisible = false
+                doc.app.popAddWallMenu.isVisible = false
+                doc.app.popAddRoomMenu.isVisible = false
                 // "Add Floor opening" is visible only if selected element is a Room
-                app.popAddFloorOpeningMenu.isVisible = isRoom
+                doc.app.popAddFloorOpeningMenu.isVisible = isRoom
             
-                app.popSepGeneral.isVisible = true
-                app.popDuplicateMenu.isVisible = true
-                app.popRemoveMenu.isVisible = true
+                doc.app.popSepGeneral.isVisible = true
+                doc.app.popDuplicateMenu.isVisible = true
+                doc.app.popRemoveMenu.isVisible = true
             
-                app.popSepElements.isVisible = isWall
-                app.popAddWindowMenu.isVisible = isWall
-                app.popAddDoorMenu.isVisible = isWall
+                doc.app.popSepElements.isVisible = isWall
+                doc.app.popAddWindowMenu.isVisible = isWall
+                doc.app.popAddDoorMenu.isVisible = isWall
             
-                app.popSepRoom.isVisible = isRoom
-                app.popAddStairsMenu.isVisible = isRoom
+                doc.app.popSepRoom.isVisible = isRoom
+                doc.app.popAddStairsMenu.isVisible = isRoom
             }
         
-            app.popupMenu.show(e.component, e.x, e.y)
+            doc.app.popupMenu.show(e.component, e.x, e.y)
         }
 
         private fun getStickyCoord(coord: Int, size: Int, isX: Boolean): Int {
             var bestCoord = coord
             var minDiff = STICK_THRESHOLD + 1
 
-            for (other in app.elements) {
-                if (other === app.selectedElement) continue
+            for (other in doc.elements) {
+                if (other === doc.selectedElement) continue
                 
                 val otherBounds = other.getBounds()
                 
@@ -794,7 +850,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
 
 
         private fun getRoomGroups(): List<List<Room>> {
-            val rooms = app.elements.filterIsInstance<Room>()
+            val rooms = doc.elements.filterIsInstance<Room>()
             if (rooms.isEmpty()) return emptyList()
 
             val adjacency = mutableMapOf<Room, MutableSet<Room>>()
@@ -852,7 +908,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
         }
 
         private fun getDockedSequences(isHorizontal: Boolean): List<List<Room>> {
-            val rooms = app.elements.filterIsInstance<Room>()
+            val rooms = doc.elements.filterIsInstance<Room>()
             if (rooms.isEmpty()) return emptyList()
 
             val adjacency = mutableMapOf<Room, MutableSet<Room>>()
@@ -920,7 +976,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             for (r in group) {
                 totalArea += r.getArea()
                 val rBounds = r.getBounds()
-                val nested = app.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
+                val nested = doc.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
                 for (el in nested) {
                     totalArea -= el.getArea()
                 }
@@ -931,18 +987,18 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
         override fun paintComponent(g: Graphics) {
             super.paintComponent(g)
             val g2 = g as Graphics2D
-            drawScene(g2, app.offsetX, app.offsetY, app.scale, width, height)
+            drawScene(g2, doc.offsetX, doc.offsetY, doc.scale, width, height)
         }
 
         fun drawScene(g2: Graphics2D, offX: Double, offY: Double, sc: Double, w: Int, h: Int) {
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
 
-            if (!app.isExporting) {
+            if (!doc.app.isExporting) {
                 // Draw axes
                 g2.color = Color.LIGHT_GRAY
-                val axisX = app.modelToScreen(0.0, offX, sc)
-                val axisY = app.modelToScreen(0.0, offY, sc)
+                val axisX = doc.modelToScreen(0.0, offX, sc)
+                val axisY = doc.modelToScreen(0.0, offY, sc)
                 g2.drawLine(0, axisY, w, axisY)
                 g2.drawLine(axisX, 0, axisX, h)
 
@@ -965,17 +1021,17 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 g2.color = Color(220, 220, 220) // Very light gray for grid
 
                 // X grid lines
-                var gridX = (app.screenToModel(0, offX, sc) / step).roundToInt() * step
-                while (app.modelToScreen(gridX.toDouble(), offX, sc) < w) {
-                    val sx = app.modelToScreen(gridX.toDouble(), offX, sc)
+                var gridX = (doc.screenToModel(0, offX, sc) / step).roundToInt() * step
+                while (doc.modelToScreen(gridX.toDouble(), offX, sc) < w) {
+                    val sx = doc.modelToScreen(gridX.toDouble(), offX, sc)
                     g2.drawLine(sx, 0, sx, h)
                     gridX += step
                 }
 
                 // Y grid lines
-                var gridY = (app.screenToModel(0, offY, sc) / step).roundToInt() * step
-                while (app.modelToScreen(gridY.toDouble(), offY, sc) < h) {
-                    val sy = app.modelToScreen(gridY.toDouble(), offY, sc)
+                var gridY = (doc.screenToModel(0, offY, sc) / step).roundToInt() * step
+                while (doc.modelToScreen(gridY.toDouble(), offY, sc) < h) {
+                    val sy = doc.modelToScreen(gridY.toDouble(), offY, sc)
                     g2.drawLine(0, sy, w, sy)
                     gridY += step
                 }
@@ -983,9 +1039,9 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 
                 // X axis ticks
                 g2.color = Color.GRAY
-                var startX = (app.screenToModel(0, offX, sc) / step).roundToInt() * step
-                while (app.modelToScreen(startX.toDouble(), offX, sc) < w) {
-                    val sx = app.modelToScreen(startX.toDouble(), offX, sc)
+                var startX = (doc.screenToModel(0, offX, sc) / step).roundToInt() * step
+                while (doc.modelToScreen(startX.toDouble(), offX, sc) < w) {
+                    val sx = doc.modelToScreen(startX.toDouble(), offX, sc)
                     g2.drawLine(sx, axisY - 5, sx, axisY + 5)
                     if (startX != 0) {
                         val label = if (abs(startX) % 100 == 0) "${startX / 100}m" else "${startX}cm"
@@ -997,9 +1053,9 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 }
 
                 // Y axis ticks
-                var startY = (app.screenToModel(0, offY, sc) / step).roundToInt() * step
-                while (app.modelToScreen(startY.toDouble(), offY, sc) < h) {
-                    val sy = app.modelToScreen(startY.toDouble(), offY, sc)
+                var startY = (doc.screenToModel(0, offY, sc) / step).roundToInt() * step
+                while (doc.modelToScreen(startY.toDouble(), offY, sc) < h) {
+                    val sy = doc.modelToScreen(startY.toDouble(), offY, sc)
                     g2.drawLine(axisX - 5, sy, axisX + 5, sy)
                     if (startY != 0) {
                         val label = if (abs(startY) % 100 == 0) "${startY / 100}m" else "${startY}cm"
@@ -1012,11 +1068,11 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             }
 
             // Draw order: Rooms, FloorOpening, Walls, Stairs, Windows/Doors
-            val rooms = app.elements.filterIsInstance<Room>()
-            val floorOpenings = app.elements.filterIsInstance<FloorOpening>()
-            val walls = app.elements.filterIsInstance<Wall>()
-            val stairs = app.elements.filterIsInstance<Stairs>()
-            val attachments = app.elements.filter { it is PlanWindow || it is Door }
+            val rooms = doc.elements.filterIsInstance<Room>()
+            val floorOpenings = doc.elements.filterIsInstance<FloorOpening>()
+            val walls = doc.elements.filterIsInstance<Wall>()
+            val stairs = doc.elements.filterIsInstance<Stairs>()
+            val attachments = doc.elements.filter { it is PlanWindow || it is Door }
             
             rooms.forEach { drawElement(g2, it) }
             floorOpenings.forEach { drawElement(g2, it) }
@@ -1025,7 +1081,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             attachments.forEach { drawElement(g2, it) }
 
             // Draw overlap regions
-            val intersections = app.calculateIntersections()
+            val intersections = doc.calculateIntersections()
             if (intersections.isNotEmpty()) {
                 val stripeWidth = 10
                 val stripeImage = BufferedImage(stripeWidth, stripeWidth, BufferedImage.TYPE_INT_ARGB)
@@ -1045,21 +1101,21 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
 
                 for (info in intersections) {
                     val rect = info.rect
-                    val sx = app.modelToScreen(rect.x.toDouble(), offX, sc)
-                    val sy = app.modelToScreen(rect.y.toDouble(), offY, sc)
-                    val sw = app.modelToScreen((rect.x + rect.width).toDouble(), offX, sc) - sx
-                    val sh = app.modelToScreen((rect.y + rect.height).toDouble(), offY, sc) - sy
+                    val sx = doc.modelToScreen(rect.x.toDouble(), offX, sc)
+                    val sy = doc.modelToScreen(rect.y.toDouble(), offY, sc)
+                    val sw = doc.modelToScreen((rect.x + rect.width).toDouble(), offX, sc) - sx
+                    val sh = doc.modelToScreen((rect.y + rect.height).toDouble(), offY, sc) - sy
                     g2.fillRect(sx, sy, sw, sh)
                 }
                 g2.paint = oldPaint
             }
 
             // Draw selection markers ALWAYS on top
-            app.selectedElement?.let { el ->
-                val sx = app.modelToScreen(el.x.toDouble(), offX, sc)
-                val sy = app.modelToScreen(el.y.toDouble(), offY, sc)
-                val sw = app.modelToScreen((el.x + el.width).toDouble(), offX, sc) - sx
-                val sh = app.modelToScreen((el.y + el.height).toDouble(), offY, sc) - sy
+            doc.selectedElement?.let { el ->
+                val sx = doc.modelToScreen(el.x.toDouble(), offX, sc)
+                val sy = doc.modelToScreen(el.y.toDouble(), offY, sc)
+                val sw = doc.modelToScreen((el.x + el.width).toDouble(), offX, sc) - sx
+                val sh = doc.modelToScreen((el.y + el.height).toDouble(), offY, sc) - sy
                 drawSelection(g2, sx, sy, sw, sh)
             }
 
@@ -1073,15 +1129,15 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 var totalDist = 0.0
             
                 for (m in rulerMarkers) {
-                    val sx = app.modelToScreen(m.x.toDouble(), offX, sc)
-                    val sy = app.modelToScreen(m.y.toDouble(), offY, sc)
+                    val sx = doc.modelToScreen(m.x.toDouble(), offX, sc)
+                    val sy = doc.modelToScreen(m.y.toDouble(), offY, sc)
                 
                     g2.fillOval(sx - 4, sy - 4, 8, 8)
                 
                     if (lastP != null) {
                         g2.stroke = solidStroke
-                        val lsx = app.modelToScreen(lastP.x.toDouble(), offX, sc)
-                        val lsy = app.modelToScreen(lastP.y.toDouble(), offY, sc)
+                        val lsx = doc.modelToScreen(lastP.x.toDouble(), offX, sc)
+                        val lsy = doc.modelToScreen(lastP.y.toDouble(), offY, sc)
                         g2.drawLine(lsx, lsy, sx, sy)
                     
                         val dist = lastP.distance(m)
@@ -1097,10 +1153,10 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 if (rulerClosed && rulerMarkers.size > 2) {
                     val first = rulerMarkers.first()
                     val last = rulerMarkers.last()
-                    val fsx = app.modelToScreen(first.x.toDouble(), offX, sc)
-                    val fsy = app.modelToScreen(first.y.toDouble(), offY, sc)
-                    val lsx = app.modelToScreen(last.x.toDouble(), offX, sc)
-                    val lsy = app.modelToScreen(last.y.toDouble(), offY, sc)
+                    val fsx = doc.modelToScreen(first.x.toDouble(), offX, sc)
+                    val fsy = doc.modelToScreen(first.y.toDouble(), offY, sc)
+                    val lsx = doc.modelToScreen(last.x.toDouble(), offX, sc)
+                    val lsy = doc.modelToScreen(last.y.toDouble(), offY, sc)
                     
                     g2.stroke = solidStroke
                     g2.drawLine(lsx, lsy, fsx, fsy)
@@ -1113,13 +1169,13 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             
                 if (rulerProbeEnabled) {
                     rulerProbePoint?.let { probe ->
-                        val sx = app.modelToScreen(probe.x.toDouble(), offX, sc)
-                        val sy = app.modelToScreen(probe.y.toDouble(), offY, sc)
+                        val sx = doc.modelToScreen(probe.x.toDouble(), offX, sc)
+                        val sy = doc.modelToScreen(probe.y.toDouble(), offY, sc)
                     
                         if (lastP != null) {
                             g2.stroke = rulerStroke
-                            val lsx = app.modelToScreen(lastP.x.toDouble(), offX, sc)
-                            val lsy = app.modelToScreen(lastP.y.toDouble(), offY, sc)
+                            val lsx = doc.modelToScreen(lastP.x.toDouble(), offX, sc)
+                            val lsy = doc.modelToScreen(lastP.y.toDouble(), offY, sc)
                             g2.drawLine(lsx, lsy, sx, sy)
                         
                             val dist = lastP.distance(probe)
@@ -1149,17 +1205,17 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                     
                     var rCorrected = r.getArea()
                     val rBounds = r.getBounds()
-                    val nested = app.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
+                    val nested = doc.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
                     for (el in nested) {
                         rCorrected -= el.getArea()
                     }
                     groupCorrectedArea += rCorrected
                 }
 
-                val sx = app.modelToScreen(largestRoom.x.toDouble(), offX, sc)
-                val sy = app.modelToScreen(largestRoom.y.toDouble(), offY, sc)
-                val sw = app.modelToScreen((largestRoom.x + largestRoom.width).toDouble(), offX, sc) - sx
-                val sh = app.modelToScreen((largestRoom.y + largestRoom.height).toDouble(), offY, sc) - sy
+                val sx = doc.modelToScreen(largestRoom.x.toDouble(), offX, sc)
+                val sy = doc.modelToScreen(largestRoom.y.toDouble(), offY, sc)
+                val sw = doc.modelToScreen((largestRoom.x + largestRoom.width).toDouble(), offX, sc) - sx
+                val sh = doc.modelToScreen((largestRoom.y + largestRoom.height).toDouble(), offY, sc) - sy
 
                 g2.color = Color.BLACK
                 val areaLabel = if (abs(groupNominalArea - groupCorrectedArea) > 0.1) {
@@ -1179,13 +1235,13 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 g2.drawString(areaLabel, xPos, yPos)
             }
 
-            if (app.showDimensionLabels || app.isExporting) {
+            if (doc.showDimensionLabels || doc.app.isExporting) {
                 drawDimensionLabels(g2)
             }
         }
 
         private fun drawDimensionLabels(g2: Graphics2D) {
-            val rooms = app.elements.filterIsInstance<Room>()
+            val rooms = doc.elements.filterIsInstance<Room>()
             val margin = 30 // cm margin from room edge
             
             g2.color = Color.BLUE
@@ -1215,10 +1271,10 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 if (commonMaxY > commonMinY) {
                     // Draw horizontal axis along center of common rectangle
                     val centerY = (commonMinY + commonMaxY) / 2.0
-                    val scY = app.modelToScreen(centerY, app.offsetY)
+                    val scY = doc.modelToScreen(centerY, doc.offsetY)
                     
-                    val sscx1 = app.modelToScreen(totalMinX.toDouble(), app.offsetX)
-                    val sscx2 = app.modelToScreen(totalMaxX.toDouble(), app.offsetX)
+                    val sscx1 = doc.modelToScreen(totalMinX.toDouble(), doc.offsetX)
+                    val sscx2 = doc.modelToScreen(totalMaxX.toDouble(), doc.offsetX)
                     
                     val totalWidth = totalMaxX - totalMinX
                     val label = "$totalWidth cm"
@@ -1250,10 +1306,10 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 if (commonMaxX > commonMinX) {
                     // Draw vertical axis along center of common rectangle
                     val centerX = (commonMinX + commonMaxX) / 2.0
-                    val scX = app.modelToScreen(centerX, app.offsetX)
+                    val scX = doc.modelToScreen(centerX, doc.offsetX)
                     
-                    val sscy1 = app.modelToScreen(totalMinY.toDouble(), app.offsetY)
-                    val sscy2 = app.modelToScreen(totalMaxY.toDouble(), app.offsetY)
+                    val sscy1 = doc.modelToScreen(totalMinY.toDouble(), doc.offsetY)
+                    val sscy2 = doc.modelToScreen(totalMaxY.toDouble(), doc.offsetY)
                     
                     val totalHeight = totalMaxY - totalMinY
                     val label = "$totalHeight cm"
@@ -1276,12 +1332,12 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             
             for (room in rooms) {
                 // Room bounds in screen pixels
-                val rsx = app.modelToScreen(room.x.toDouble(), app.offsetX)
-                val rsy = app.modelToScreen(room.y.toDouble(), app.offsetY)
-                val rsw = app.modelToScreen((room.x + room.width).toDouble(), app.offsetX) - rsx
-                val rsh = app.modelToScreen((room.y + room.height).toDouble(), app.offsetY) - rsy
+                val rsx = doc.modelToScreen(room.x.toDouble(), doc.offsetX)
+                val rsy = doc.modelToScreen(room.y.toDouble(), doc.offsetY)
+                val rsw = doc.modelToScreen((room.x + room.width).toDouble(), doc.offsetX) - rsx
+                val rsh = doc.modelToScreen((room.y + room.height).toDouble(), doc.offsetY) - rsy
                 
-                val marginPx = (margin * app.scale * app.pixelsPerCm).roundToInt()
+                val marginPx = (margin * doc.scale * doc.pixelsPerCm).roundToInt()
                 
                 // Horizontal dimension line (Width) - INSIDE
                 // Skip if part of horizontal sequence
@@ -1320,22 +1376,22 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
             }
             
             // Labels for Windows and Doors
-            for (el in app.elements) {
+            for (el in doc.elements) {
                 if (el is PlanWindow || el is Door) {
-                    val wall = app.findContainingWall(el.x, el.y, el.width, el.height)
+                    val wall = doc.findContainingWall(el.x, el.y, el.width, el.height)
                     val effectiveWidth = if (wall != null) {
                         val isVertical = wall.width < wall.height
                         if (isVertical) el.height else el.width
                     } else {
                         maxOf(el.width, el.height)
                     }
-                    val h3d = if (el is PlanWindow) el.height3D else (el as Door).height3D
+                    val h3d = if (el is PlanWindow) el.height3D else (el as Door).verticalHeight
                     val label = "($effectiveWidth x $h3d)"
                     
-                    val sx = app.modelToScreen(el.x.toDouble(), app.offsetX)
-                    val sy = app.modelToScreen(el.y.toDouble(), app.offsetY)
-                    val sw = app.modelToScreen((el.x + el.width).toDouble(), app.offsetX) - sx
-                    val sh = app.modelToScreen((el.y + el.height).toDouble(), app.offsetY) - sy
+                    val sx = doc.modelToScreen(el.x.toDouble(), doc.offsetX)
+                    val sy = doc.modelToScreen(el.y.toDouble(), doc.offsetY)
+                    val sw = doc.modelToScreen((el.x + el.width).toDouble(), doc.offsetX) - sx
+                    val sh = doc.modelToScreen((el.y + el.height).toDouble(), doc.offsetY) - sy
                     
                     val lw = metrics.stringWidth(label)
                     val lh = metrics.ascent
@@ -1373,10 +1429,10 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
         }
 
         private fun drawElement(g2: Graphics2D, el: PlanElement) {
-            val sx = app.modelToScreen(el.x.toDouble(), app.offsetX)
-            val sy = app.modelToScreen(el.y.toDouble(), app.offsetY)
-            val sw = app.modelToScreen((el.x + el.width).toDouble(), app.offsetX) - sx
-            val sh = app.modelToScreen((el.y + el.height).toDouble(), app.offsetY) - sy
+            val sx = doc.modelToScreen(el.x.toDouble(), doc.offsetX)
+            val sy = doc.modelToScreen(el.y.toDouble(), doc.offsetY)
+            val sw = doc.modelToScreen((el.x + el.width).toDouble(), doc.offsetX) - sx
+            val sh = doc.modelToScreen((el.y + el.height).toDouble(), doc.offsetY) - sy
 
             when (el.type) {
                 ElementType.WALL -> g2.color = Color.DARK_GRAY
@@ -1387,7 +1443,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                     g2.color = Color(230, 230, 230) // Light gray
                     val poly = Polygon()
                     (el as FloorOpening).vertices.forEach {
-                        poly.addPoint(app.modelToScreen(it.x.toDouble(), app.offsetX), app.modelToScreen(it.y.toDouble(), app.offsetY))
+                        poly.addPoint(doc.modelToScreen(it.x.toDouble(), doc.offsetX), doc.modelToScreen(it.y.toDouble(), doc.offsetY))
                     }
                     g2.fillPolygon(poly)
                     return
@@ -1403,7 +1459,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                     
                     // Normal stair depth is 25cm
                     val normalStairDepthCm = 25.0
-                    val stepPx = (normalStairDepthCm * app.scale * app.pixelsPerCm).roundToInt()
+                    val stepPx = (normalStairDepthCm * doc.scale * doc.pixelsPerCm).roundToInt()
                     
                     if (el.width > el.height) {
                         // Horizontal stairs - vertical lines
@@ -1431,24 +1487,24 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
         }
 
         private fun drawSelection(g2: Graphics2D, sx: Int, sy: Int, sw: Int, sh: Int) {
-            g2.color = Color.RED
+            val selectionColor = if (doc.app.activeDocument == doc) Color.RED else Color.GRAY
+            g2.color = selectionColor
             g2.setStroke(BasicStroke(2f))
-            if (app.selectedElement is FloorOpening) {
+            if (doc.selectedElement is FloorOpening) {
                 val poly = Polygon()
-                (app.selectedElement as FloorOpening).vertices.forEach {
-                    poly.addPoint(app.modelToScreen(it.x.toDouble(), app.offsetX), app.modelToScreen(it.y.toDouble(), app.offsetY))
+                (doc.selectedElement as FloorOpening).vertices.forEach {
+                    poly.addPoint(doc.modelToScreen(it.x.toDouble(), doc.offsetX), doc.modelToScreen(it.y.toDouble(), doc.offsetY))
                 }
                 g2.drawPolygon(poly)
                 
-                g2.color = Color.WHITE
                 val r = HANDLE_SIZE / 2
-                (app.selectedElement as FloorOpening).vertices.forEachIndexed { index, it ->
-                    val vsx = app.modelToScreen(it.x.toDouble(), app.offsetX)
-                    val vsy = app.modelToScreen(it.y.toDouble(), app.offsetY)
+                (doc.selectedElement as FloorOpening).vertices.forEachIndexed { index, it ->
+                    val vsx = doc.modelToScreen(it.x.toDouble(), doc.offsetX)
+                    val vsy = doc.modelToScreen(it.y.toDouble(), doc.offsetY)
                     
                     g2.color = Color.WHITE
                     g2.fillRect(vsx - r, vsy - r, 2 * r, 2 * r)
-                    g2.color = Color.RED
+                    g2.color = selectionColor
                     g2.drawRect(vsx - r, vsy - r, 2 * r, 2 * r)
                     
                     // Draw marker number with a small background for better visibility
@@ -1469,7 +1525,6 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 g2.drawRect(sx, sy, sw, sh)
 
                 // Draw resize handles
-                g2.color = Color.WHITE
                 val r = HANDLE_SIZE / 2
                 val handles = listOf(
                     Point(sx, sy), Point(sx + sw / 2, sy), Point(sx + sw, sy),
@@ -1479,7 +1534,7 @@ class CanvasPanel(private val app: FloorPlanApp) : JPanel() {
                 for (hp in handles) {
                     g2.color = Color.WHITE
                     g2.fillRect(hp.x - r, hp.y - r, 2 * r, 2 * r)
-                    g2.color = Color.RED
+                    g2.color = selectionColor
                     g2.drawRect(hp.x - r, hp.y - r, 2 * r, 2 * r)
                 }
             }

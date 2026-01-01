@@ -37,13 +37,14 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         duplicateMarkerItem.addActionListener {
             val row = polygonTable.selectedRow
             if (row != -1) {
-                val es = app.selectedElement as? FloorOpening ?: return@addActionListener
-                app.saveState()
+                val doc = app.activeDocument ?: return@addActionListener
+                val es = doc.selectedElement as? FloorOpening ?: return@addActionListener
+                doc.saveState()
                 val v = es.vertices[row]
                 es.vertices.add(row + 1, Point(v.x + 10, v.y + 10))
                 es.updateBounds()
                 updateFields(es)
-                app.canvas.repaint()
+                doc.canvas.repaint()
                 app.statsPanel.update()
             }
         }
@@ -53,13 +54,14 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         removeMarkerItem.addActionListener {
             val row = polygonTable.selectedRow
             if (row != -1) {
-                val es = app.selectedElement as? FloorOpening ?: return@addActionListener
+                val doc = app.activeDocument ?: return@addActionListener
+                val es = doc.selectedElement as? FloorOpening ?: return@addActionListener
                 if (es.vertices.size > 3) {
-                    app.saveState()
+                    doc.saveState()
                     es.vertices.removeAt(row)
                     es.updateBounds()
                     updateFields(es)
-                    app.canvas.repaint()
+                    doc.canvas.repaint()
                     app.statsPanel.update()
                 } else {
                     JOptionPane.showMessageDialog(this, "A polygon must have at least 3 vertices")
@@ -80,16 +82,20 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
         polygonTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
-                val es = app.selectedElement as? FloorOpening ?: return@addTableModelListener
+                val doc = app.activeDocument ?: return@addTableModelListener
+                val es = doc.selectedElement as? FloorOpening ?: return@addTableModelListener
                 val row = e.firstRow
                 val col = e.column
                 val value = polygonTableModel.getValueAt(row, col).toString().toIntOrNull()
                 if (value != null) {
-                    app.saveState()
-                    if (col == 1) es.vertices[row].x = value
-                    if (col == 2) es.vertices[row].y = value
-                    es.updateBounds()
-                    app.canvas.repaint()
+                    val currentVal = if (col == 1) es.vertices[row].x else if (col == 2) es.vertices[row].y else null
+                    if (currentVal != value) {
+                        doc.saveState()
+                        if (col == 1) es.vertices[row].x = value
+                        if (col == 2) es.vertices[row].y = value
+                        es.updateBounds()
+                        doc.canvas.repaint()
+                    }
                 }
             }
         }
@@ -98,14 +104,15 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun addElement(type: ElementType) {
-        val centerX = app.screenToModel(app.canvas.width / 2, app.offsetX).roundToInt()
-        val centerY = app.screenToModel(app.canvas.height / 2, app.offsetY).roundToInt()
+        val doc = app.activeDocument ?: return
+        val centerX = doc.screenToModel(doc.canvas.width / 2, doc.offsetX).roundToInt()
+        val centerY = doc.screenToModel(doc.canvas.height / 2, doc.offsetY).roundToInt()
         
         val el = when(type) {
             ElementType.WALL -> Wall(centerX - 50, centerY - 10, 100, 20)
             ElementType.ROOM -> Room(centerX - 50, centerY - 50, 100, 100)
             ElementType.STAIRS -> {
-                val room = app.selectedElement as? Room
+                val room = doc.selectedElement as? Room
                 if (room != null) {
                     Stairs(room.x + 10, room.y + 10, 80, 40)
                 } else {
@@ -114,25 +121,33 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             ElementType.FLOOR_OPENING -> {
                 // This can now be triggered from empty space popup
-                app.currentMode = AppMode.RULER
-                app.canvas.isCreatingFloorOpening = true
-                app.canvas.rulerMarkers.clear()
-                app.canvas.rulerClosed = false
-                app.canvas.rulerProbeEnabled = true
-                app.canvas.repaint()
+                doc.currentMode = AppMode.RULER
+                doc.canvas.isCreatingFloorOpening = true
+                doc.canvas.rulerMarkers.clear()
+                doc.canvas.rulerClosed = false
+                doc.canvas.rulerProbeEnabled = true
+                doc.canvas.repaint()
                 return
             }
             else -> null
         }
         
         el?.let {
-            app.elements.add(it)
-            app.saveState()
-            app.selectedElement = it
+            doc.saveState()
+            doc.elements.add(it)
             updateFields(it)
             app.elementStatsPanel.updateElementStats(it)
             app.statsPanel.update()
-            app.canvas.repaint()
+            doc.canvas.repaint()
+        }
+    }
+
+    fun updateFieldsForActiveDocument() {
+        val el = app.activeDocument?.selectedElement
+        if (el != null) {
+            updateFields(el)
+        } else {
+            clearFields()
         }
     }
 
@@ -142,13 +157,13 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         dimensionTableModel.addRow(arrayOf("Type", el.javaClass.simpleName))
         dimensionTableModel.addRow(arrayOf("X", el.x))
         dimensionTableModel.addRow(arrayOf("Y", el.y))
-        dimensionTableModel.addRow(arrayOf("Width", el.width))
-        dimensionTableModel.addRow(arrayOf("Height", el.height))
+        dimensionTableModel.addRow(arrayOf("Plan width", el.width))
+        dimensionTableModel.addRow(arrayOf("Plan height", el.height))
         if (el is PlanWindow || el is Door) {
-            val h3d = if (el is PlanWindow) el.height3D else (el as Door).height3D
-            dimensionTableModel.addRow(arrayOf("Height 3D", h3d))
+            val h3d = if (el is PlanWindow) el.height3D else (el as Door).verticalHeight
+            dimensionTableModel.addRow(arrayOf("Vertical height", h3d))
             if (el is PlanWindow) {
-                dimensionTableModel.addRow(arrayOf("Above floor height", el.aboveFloorHeight))
+                dimensionTableModel.addRow(arrayOf("Sill elevation", el.sillElevation))
             }
         }
 
@@ -177,7 +192,8 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun applyManualChanges(source: String) {
-        val el = app.selectedElement ?: return
+        val doc = app.activeDocument ?: return
+        val el = doc.selectedElement ?: return
         
         var newVal: Int? = null
         var doubleVal: Double? = null
@@ -192,24 +208,41 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
         if (newVal == null && doubleVal == null) return
 
-        app.saveState()
+        val isChanged = when (source) {
+            "X" -> el.x != newVal
+            "Y" -> el.y != newVal
+            "Plan width" -> el.width != newVal
+            "Plan height" -> el.height != newVal
+            "Vertical height" -> {
+                val current = if (el is PlanWindow) el.height3D else if (el is Door) el.verticalHeight else null
+                current != doubleVal?.toInt()
+            }
+            "Sill elevation" -> {
+                if (el is PlanWindow) el.sillElevation != doubleVal?.toInt() else false
+            }
+            else -> false
+        }
+
+        if (!isChanged) return
+
+        doc.saveState()
         when (source) {
             "X" -> el.x = newVal!!
             "Y" -> el.y = newVal!!
-            "Width" -> el.width = newVal!!
-            "Height" -> el.height = newVal!!
-            "Height 3D" -> {
+            "Plan width" -> el.width = newVal!!
+            "Plan height" -> el.height = newVal!!
+            "Vertical height" -> {
                 if (el is PlanWindow) el.height3D = doubleVal!!.toInt()
-                if (el is Door) el.height3D = doubleVal!!.toInt()
+                if (el is Door) el.verticalHeight = doubleVal!!.toInt()
             }
-            "Above floor height" -> {
-                if (el is PlanWindow) el.aboveFloorHeight = doubleVal!!.toInt()
+            "Sill elevation" -> {
+                if (el is PlanWindow) el.sillElevation = doubleVal!!.toInt()
             }
         }
         
         if (el is FloorOpening) el.updateBounds()
         
-        app.canvas.repaint()
+        doc.canvas.repaint()
         app.elementStatsPanel.updateElementStats(el)
         app.statsPanel.update()
     }

@@ -2,7 +2,7 @@
 
 # Log file
 *.log
-*.properties
+floorplan_settings.properties
 
 # BlueJ files
 *.ctxt

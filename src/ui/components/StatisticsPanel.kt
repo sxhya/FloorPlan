@@ -37,23 +37,26 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
         warningLabel.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (problematicElements.isNotEmpty()) {
-                    app.recenterOnElement(problematicElements.first())
-                    app.selectedElement = problematicElements.first()
-                    app.elementStatsPanel.updateElementStats(app.selectedElement)
-                    app.sidePanel.updateFields(app.selectedElement!!)
-                    app.canvas.repaint()
+                    val doc = app.activeDocument ?: return
+                    val el = problematicElements.first()
+                    doc.recenterOnElement(el)
+                    doc.selectedElement = el
+                    app.elementStatsPanel.updateElementStats(el)
+                    app.sidePanel.updateFields(el)
+                    doc.canvas.repaint()
                 }
             }
         })
     }
 
     fun update() {
-        val walls = app.elements.filterIsInstance<Wall>()
-        val rooms = app.elements.filterIsInstance<Room>()
-        val windows = app.elements.filterIsInstance<PlanWindow>()
-        val doors = app.elements.filterIsInstance<Door>()
-        val unusable = app.elements.filter { it is Stairs }
-        val emptySpaces = app.elements.filterIsInstance<FloorOpening>()
+        val doc = app.activeDocument ?: return
+        val walls = doc.elements.filterIsInstance<Wall>()
+        val rooms = doc.elements.filterIsInstance<Room>()
+        val windows = doc.elements.filterIsInstance<PlanWindow>()
+        val doors = doc.elements.filterIsInstance<Door>()
+        val unusable = doc.elements.filter { it is Stairs }
+        val emptySpaces = doc.elements.filterIsInstance<FloorOpening>()
         
         problematicElements.clear()
 
@@ -81,22 +84,22 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
         var totalDoorArea = 0.0
         var totalDoorVol = 0.0
         for (door in doors) {
-            val wall = app.findContainingWall(door.x, door.y, door.width, door.height)
+            val wall = doc.findContainingWall(door.x, door.y, door.width, door.height)
             val effectiveWidth = if (wall != null) {
                 val isVertical = wall.width < wall.height
                 if (isVertical) door.height else door.width
             } else {
                 maxOf(door.width, door.height)
             }
-            totalDoorArea += effectiveWidth.toDouble() * door.height3D
-            totalDoorVol += door.getArea() * door.height3D
+            totalDoorArea += effectiveWidth.toDouble() * door.verticalHeight
+            totalDoorVol += door.getArea() * door.verticalHeight
         }
         doorAreaLabel.text = "Door Area/Vol: %.2f m² / %.2f m³".format(totalDoorArea / 10000.0, totalDoorVol / 1000000.0)
 
         var totalWindowArea = 0.0
         var totalWindowVol = 0.0
         for (window in windows) {
-            val wall = app.findContainingWall(window.x, window.y, window.width, window.height)
+            val wall = doc.findContainingWall(window.x, window.y, window.width, window.height)
             val effectiveWidth = if (wall != null) {
                 val isVertical = wall.width < wall.height
                 if (isVertical) window.height else window.width
@@ -120,7 +123,7 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
             }
         }
         
-        val intersections = app.calculateIntersections()
+        val intersections = doc.calculateIntersections()
         if (intersections.isNotEmpty()) {
             sb.append("${intersections.size} intersections detected. ")
             problematicElements.addAll(intersections.map { it.el1 })
