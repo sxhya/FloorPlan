@@ -41,7 +41,6 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
                     val el = problematicElements.first()
                     doc.recenterOnElement(el)
                     doc.selectedElement = el
-                    app.elementStatsPanel.updateElementStats(el)
                     app.sidePanel.updateFields(el)
                     doc.canvas.repaint()
                 }

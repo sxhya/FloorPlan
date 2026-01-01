@@ -19,7 +19,6 @@ class SidePanelWindow(val app: FloorPlanApp) : JFrame() {
         
         val bottomPanel = JPanel()
         bottomPanel.layout = BoxLayout(bottomPanel, BoxLayout.Y_AXIS)
-        bottomPanel.add(app.elementStatsPanel)
         bottomPanel.add(app.statsPanel)
         sideContainer.add(bottomPanel, BorderLayout.SOUTH)
         

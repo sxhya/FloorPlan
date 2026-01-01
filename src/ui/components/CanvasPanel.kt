@@ -209,7 +209,6 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     if (doc.selectedElement != null) {
                         dragStart = e.point
                         val el = doc.selectedElement!!
-                        doc.app.elementStatsPanel.updateElementStats(el)
                         initialElementBounds = Rectangle(el.x, el.y, el.width, el.height)
                         if (el is FloorOpening) {
                             initialVertices = el.vertices.map { Point(it.x, it.y) }
@@ -237,7 +236,6 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                         }
                     } else {
                         doc.selectedElement = null
-                        doc.app.elementStatsPanel.updateElementStats(null)
                         doc.app.sidePanel.clearFields()
                         if (e.isPopupTrigger) {
                             showPopup(e)
@@ -768,10 +766,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
             }
             if (doc.selectedElement != null) {
-                doc.app.elementStatsPanel.updateElementStats(doc.selectedElement)
                 doc.app.sidePanel.updateFields(doc.selectedElement!!)
             } else {
-                doc.app.elementStatsPanel.updateElementStats(null)
                 doc.app.sidePanel.clearFields()
             }
             doc.canvas.repaint()

@@ -9,7 +9,6 @@ import model.Door
 import model.Stairs
 import model.FloorOpening
 import ui.components.SidePanel
-import ui.components.ElementStatisticsPanel
 import ui.components.StatisticsPanel
 import java.awt.*
 import java.awt.image.BufferedImage
@@ -30,7 +29,6 @@ class FloorPlanApp {
     internal var activeWindow: EditorWindow? = null
     
     internal val sidePanel = SidePanel(this)
-    internal val elementStatsPanel = ElementStatisticsPanel(this)
     internal val statsPanel = StatisticsPanel(this)
     
     private var sidePanelWindow: SidePanelWindow? = null
@@ -184,7 +182,6 @@ class FloorPlanApp {
                     doc.saveState()
                     doc.elements.add(it)
                     doc.selectedElement = it
-                    elementStatsPanel.updateElementStats(it)
                     sidePanel.updateFields(it)
                     statsPanel.update()
                     doc.canvas.repaint()
@@ -199,7 +196,6 @@ class FloorPlanApp {
                 doc.saveState()
                 doc.elements.remove(el)
                 doc.selectedElement = null
-                elementStatsPanel.updateElementStats(null)
                 sidePanel.clearFields()
                 statsPanel.update()
                 doc.canvas.repaint()
@@ -591,9 +587,10 @@ class FloorPlanApp {
 
     private fun openFromXML() {
         val chooser = JFileChooser()
+        chooser.isMultiSelectionEnabled = true
         lastDirectory?.let { chooser.currentDirectory = File(it) }
         if (chooser.showOpenDialog(activeWindow) == JFileChooser.APPROVE_OPTION) {
-            openFile(chooser.selectedFile)
+            chooser.selectedFiles.forEach { openFile(it) }
         }
     }
 

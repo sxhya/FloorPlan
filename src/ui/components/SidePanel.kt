@@ -11,7 +11,14 @@ import kotlin.math.roundToInt
 class SidePanel(private val app: FloorPlanApp) : JPanel() {
     private val mainFieldsPanel = JPanel(BorderLayout())
     private val dimensionTableModel = object : DefaultTableModel(arrayOf("Property", "Value"), 0) {
-        override fun isCellEditable(row: Int, column: Int): Boolean = column == 1
+        override fun isCellEditable(row: Int, column: Int): Boolean {
+            if (column != 1) return false
+            val prop = getValueAt(row, 0)?.toString() ?: return false
+            return when (prop) {
+                "Type", "Element Area", "Opening Area", "Opening Volume", "" -> false
+                else -> true
+            }
+        }
     }
     private val dimensionTable = JTable(dimensionTableModel)
 
@@ -136,7 +143,6 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             doc.saveState()
             doc.elements.add(it)
             updateFields(it)
-            app.elementStatsPanel.updateElementStats(it)
             app.statsPanel.update()
             doc.canvas.repaint()
         }
@@ -165,6 +171,29 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             if (el is PlanWindow) {
                 dimensionTableModel.addRow(arrayOf("Sill elevation", el.sillElevation))
             }
+        }
+
+        // Add blank row
+        dimensionTableModel.addRow(arrayOf("", ""))
+
+        // Add statistics
+        dimensionTableModel.addRow(arrayOf("Element Area", "%.2f m²".format(el.getArea() / 10000.0)))
+        if (el is PlanWindow || el is Door) {
+            val h3d = if (el is PlanWindow) el.height3D else (el as Door).verticalHeight
+            val doc = app.activeDocument
+            val wall = doc?.findContainingWall(el.x, el.y, el.width, el.height)
+            val effectiveWidth = if (wall != null) {
+                val isVertical = wall.width < wall.height
+                if (isVertical) el.height else el.width
+            } else {
+                maxOf(el.width, el.height)
+            }
+
+            val opArea = effectiveWidth.toDouble() * h3d
+            val opVol = el.getArea() * h3d
+
+            dimensionTableModel.addRow(arrayOf("Opening Area", "%.2f m²".format(opArea / 10000.0)))
+            dimensionTableModel.addRow(arrayOf("Opening Volume", "%.2f m³".format(opVol / 1000000.0)))
         }
 
         if (el is FloorOpening) {
@@ -243,7 +272,6 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         if (el is FloorOpening) el.updateBounds()
         
         doc.canvas.repaint()
-        app.elementStatsPanel.updateElementStats(el)
         app.statsPanel.update()
     }
 }
