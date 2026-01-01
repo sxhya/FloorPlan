@@ -1,6 +1,8 @@
 package ui
 
-import model.PlanElement
+import model.*
+import model.Vector3D
+import model.Rect3D
 import model.ElementType
 import model.Wall
 import model.Room
@@ -15,6 +17,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
 import javax.swing.*
+import javax.swing.table.DefaultTableModel
 import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.transform.OutputKeys
 import javax.xml.transform.TransformerFactory
@@ -39,6 +42,7 @@ class FloorPlanApp {
     private var lastDirectory: String? = null
     private val recentFiles = mutableListOf<String>()
     private val openFiles = mutableListOf<String>()
+    private val threeDDocuments = mutableListOf<ThreeDDocument>()
     private data class WindowState(val pos: Point, val size: Dimension, val scale: Double, val offsetX: Double, val offsetY: Double)
     private val openFileStates = mutableMapOf<String, WindowState>()
     private var sidePanelX: Int? = null
@@ -325,7 +329,12 @@ class FloorPlanApp {
         fileMenu.add(newItem)
         
         val openItem = JMenuItem("Open")
-        openItem.addActionListener { openFromXML() }
+        openItem.addActionListener { 
+            val options = arrayOf("Floor Plan (XML)", "3D Model (.3d)")
+            val choice = JOptionPane.showOptionDialog(null, "Select file type to open", "Open", JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0])
+            if (choice == 0) openFromXML()
+            else if (choice == 1) open3D()
+        }
         fileMenu.add(openItem)
         
         val recentMenu = JMenu("Recent Files")
@@ -336,11 +345,21 @@ class FloorPlanApp {
         fileMenu.addSeparator()
         
         val saveItem = JMenuItem("Save")
-        saveItem.addActionListener { save() }
+        saveItem.addActionListener { 
+            activeDocument?.let { save() }
+            activeWindow?.let { win ->
+                if (win is ThreeDWindow) save3D(win.doc)
+            }
+        }
         fileMenu.add(saveItem)
         
         val saveAsItem = JMenuItem("Save As...")
-        saveAsItem.addActionListener { saveAs() }
+        saveAsItem.addActionListener { 
+            activeDocument?.let { saveAs() }
+            activeWindow?.let { win ->
+                if (win is ThreeDWindow) saveAs3D(win.doc)
+            }
+        }
         fileMenu.add(saveAsItem)
         
         fileMenu.addSeparator()
@@ -402,10 +421,253 @@ class FloorPlanApp {
         }
         viewMenu.add(dimLabelsItem)
         menuBar.add(viewMenu)
+
+        val toolsMenu = JMenu("Tools")
+        val create3DItem = JMenuItem("Create 3D model")
+        create3DItem.addActionListener { showCreate3DDialog() }
+        toolsMenu.add(create3DItem)
+        menuBar.add(toolsMenu)
         
         menuBars.add(menuBar)
         updateRecentMenu()
         return menuBar
+    }
+
+    private fun showCreate3DDialog() {
+        val dialog = JDialog(activeWindow, "Create 3D Model", true)
+        dialog.layout = BorderLayout()
+        dialog.setSize(500, 400)
+        dialog.setLocationRelativeTo(activeWindow)
+
+        val topPanel = JPanel()
+        topPanel.add(JLabel("Number of floors:"))
+        val floorCountSpinner = JSpinner(SpinnerNumberModel(1, 1, 20, 1))
+        topPanel.add(floorCountSpinner)
+
+        val tableModel = DefaultTableModel(arrayOf("Floor", "Document", "Height (cm)"), 0)
+        val table = JTable(tableModel)
+        
+        fun updateRows() {
+            val count = floorCountSpinner.value as Int
+            val currentRows = tableModel.rowCount
+            if (count > currentRows) {
+                for (i in currentRows until count) {
+                    tableModel.addRow(arrayOf(i + 1, "None", 300))
+                }
+            } else if (count < currentRows) {
+                for (i in currentRows - 1 downTo count) {
+                    tableModel.removeRow(i)
+                }
+            }
+        }
+        
+        updateRows()
+        floorCountSpinner.addChangeListener { updateRows() }
+
+        val docNames = documents.map { it.currentFile?.name ?: "Untitled" }.toTypedArray()
+        val comboBox = JComboBox(docNames)
+        table.columnModel.getColumn(1).cellEditor = DefaultCellEditor(comboBox)
+
+        dialog.add(topPanel, BorderLayout.NORTH)
+        dialog.add(JScrollPane(table), BorderLayout.CENTER)
+
+        val okBtn = JButton("OK")
+        okBtn.addActionListener {
+            val floors = mutableListOf<FloorInfo>()
+            for (i in 0 until tableModel.rowCount) {
+                val docName = tableModel.getValueAt(i, 1) as String
+                val height = tableModel.getValueAt(i, 2).toString().toDouble().toInt()
+                val doc = documents.find { (it.currentFile?.name ?: "Untitled") == docName }
+                if (doc != null) {
+                    floors.add(FloorInfo(doc, height))
+                }
+            }
+            if (floors.isNotEmpty()) {
+                generate3DModel(floors)
+                dialog.dispose()
+            } else {
+                JOptionPane.showMessageDialog(dialog, "Please select documents for floors.")
+            }
+        }
+        dialog.add(okBtn, BorderLayout.SOUTH)
+        dialog.isVisible = true
+    }
+
+    private data class FloorInfo(val doc: FloorPlanDocument, val height: Int)
+
+    private fun generate3DModel(floors: List<FloorInfo>) {
+        val model3d = model.Model3D()
+        var currentZ = 0.0
+
+        for (floor in floors) {
+            val floorHeight = floor.height.toDouble()
+            for (el in floor.doc.elements) {
+                when (el) {
+                    is Room -> {
+                        // Create a floor slab for the room
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val thickness = el.floorThickness.toDouble()
+                        
+                        // Top face (floor surface at currentZ)
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y1, currentZ), Vector3D(x2, y1, currentZ),
+                            Vector3D(x2, y2, currentZ), Vector3D(x1, y2, currentZ),
+                            Color.LIGHT_GRAY
+                        ))
+                        // Bottom face (slab bottom at currentZ - thickness)
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y1, currentZ - thickness), Vector3D(x2, y1, currentZ - thickness),
+                            Vector3D(x2, y2, currentZ - thickness), Vector3D(x1, y2, currentZ - thickness),
+                            Color.LIGHT_GRAY
+                        ))
+                        // Side faces
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y1, currentZ - thickness), Vector3D(x2, y1, currentZ - thickness),
+                            Vector3D(x2, y1, currentZ), Vector3D(x1, y1, currentZ),
+                            Color.LIGHT_GRAY
+                        ))
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x2, y1, currentZ - thickness), Vector3D(x2, y2, currentZ - thickness),
+                            Vector3D(x2, y2, currentZ), Vector3D(x2, y1, currentZ),
+                            Color.LIGHT_GRAY
+                        ))
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x2, y2, currentZ - thickness), Vector3D(x1, y2, currentZ - thickness),
+                            Vector3D(x1, y2, currentZ), Vector3D(x2, y2, currentZ),
+                            Color.LIGHT_GRAY
+                        ))
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y2, currentZ - thickness), Vector3D(x1, y1, currentZ - thickness),
+                            Vector3D(x1, y1, currentZ), Vector3D(x1, y2, currentZ),
+                            Color.LIGHT_GRAY
+                        ))
+                    }
+                    is Wall -> {
+                        val wallBounds = el.getBounds()
+                        val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
+                            .filter { wallBounds.contains(it.getBounds()) }
+                        
+                        fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
+                            if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
+                            // Bottom
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x1, y2, z1), color))
+                            // Top
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z2), Vector3D(x2, y1, z2), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
+                            // Front
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y1, z2), Vector3D(x1, y1, z2), color))
+                            // Back
+                            model3d.rects.add(Rect3D(Vector3D(x1, y2, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
+                            // Left
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x1, y2, z1), Vector3D(x1, y2, z2), Vector3D(x1, y1, z2), color))
+                            // Right
+                            model3d.rects.add(Rect3D(Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x2, y1, z2), color))
+                        }
+
+                        if (openings.isEmpty()) {
+                            addBox(el.x.toDouble(), el.y.toDouble(), (el.x + el.width).toDouble(), (el.y + el.height).toDouble(), currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                        } else {
+                            val isVertical = el.width < el.height
+                            if (isVertical) {
+                                // Wall is along Y axis
+                                val x1 = el.x.toDouble()
+                                val x2 = (el.x + el.width).toDouble()
+                                var lastY = el.y.toDouble()
+                                val sortedOpenings = openings.sortedBy { it.y }
+                                for (op in sortedOpenings) {
+                                    val opY1 = op.y.toDouble()
+                                    val opY2 = (op.y + op.height).toDouble()
+                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
+                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
+                                    
+                                    // Part before opening
+                                    addBox(x1, lastY, x2, opY1, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                    // Part above opening
+                                    addBox(x1, opY1, x2, opY2, opZ2, currentZ + floorHeight, Color.DARK_GRAY)
+                                    // Part below opening
+                                    addBox(x1, opY1, x2, opY2, currentZ, opZ1, Color.DARK_GRAY)
+                                    
+                                    lastY = opY2
+                                }
+                                // Part after last opening
+                                addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                            } else {
+                                // Wall is along X axis
+                                val y1 = el.y.toDouble()
+                                val y2 = (el.y + el.height).toDouble()
+                                var lastX = el.x.toDouble()
+                                val sortedOpenings = openings.sortedBy { it.x }
+                                for (op in sortedOpenings) {
+                                    val opX1 = op.x.toDouble()
+                                    val opX2 = (op.x + op.width).toDouble()
+                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
+                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
+
+                                    // Part before opening
+                                    addBox(lastX, y1, opX1, y2, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                    // Part above opening
+                                    addBox(opX1, y1, opX2, y2, opZ2, currentZ + floorHeight, Color.DARK_GRAY)
+                                    // Part below opening
+                                    addBox(opX1, y1, opX2, y2, currentZ, opZ1, Color.DARK_GRAY)
+
+                                    lastX = opX2
+                                }
+                                // Part after last opening
+                                addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                            }
+                        }
+                    }
+                    is PlanWindow -> {
+                        // Windows are openings in walls. For simplicity, we draw them as separate colored boxes for now.
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val h3d = el.height3D.toDouble()
+                        val afh = el.sillElevation.toDouble()
+                        
+                        // Draw window as a box
+                        val wz1 = currentZ + afh
+                        val wz2 = wz1 + h3d
+                        
+                        // 6 faces
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Color.CYAN, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz2), Vector3D(x2, y1, wz2), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), Color.CYAN, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), Color.CYAN, true))
+                        model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), Color.CYAN, true))
+                        model3d.rects.add(Rect3D(Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x2, y2, wz2), Color.CYAN, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x1, y1, wz1), Vector3D(x1, y1, wz2), Vector3D(x1, y2, wz2), Color.CYAN, true))
+                    }
+                    is Door -> {
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val h3d = el.verticalHeight.toDouble()
+                        
+                        val wz1 = currentZ
+                        val wz2 = wz1 + h3d
+                        
+                        // 6 faces
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Color.ORANGE, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz2), Vector3D(x2, y1, wz2), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), Color.ORANGE, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), Color.ORANGE, true))
+                        model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), Color.ORANGE, true))
+                        model3d.rects.add(Rect3D(Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x2, y2, wz2), Color.ORANGE, true))
+                        model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x1, y1, wz1), Vector3D(x1, y1, wz2), Vector3D(x1, y2, wz2), Color.ORANGE, true))
+                    }
+                }
+            }
+            currentZ += floorHeight
+        }
+
+        val doc3d = ThreeDDocument(this)
+        doc3d.model = model3d
+        threeDDocuments.add(doc3d)
+        val window = ThreeDWindow(this, doc3d)
+        window.jMenuBar = createMenuBar()
     }
 
     private fun setupPopupMenu() {
@@ -509,6 +771,60 @@ class FloorPlanApp {
         }
     }
 
+    private fun save3D(doc: ThreeDDocument) {
+        val file = doc.currentFile
+        if (file == null) {
+            saveAs3D(doc)
+        } else {
+            performSave3D(doc, file)
+        }
+    }
+
+    private fun saveAs3D(doc: ThreeDDocument) {
+        val chooser = JFileChooser()
+        if (chooser.showSaveDialog(null) == JFileChooser.APPROVE_OPTION) {
+            var file = chooser.selectedFile
+            if (!file.name.endsWith(".3d")) {
+                file = File(file.absolutePath + ".3d")
+            }
+            performSave3D(doc, file)
+        }
+    }
+
+    private fun performSave3D(doc: ThreeDDocument, file: File) {
+        try {
+            java.io.ObjectOutputStream(file.outputStream()).use {
+                it.writeObject(doc.model)
+            }
+            doc.currentFile = file
+            doc.isModified = false
+            // addToRecent(file) // For now don't mix with floor plans
+        } catch (e: Exception) {
+            e.printStackTrace()
+            JOptionPane.showMessageDialog(null, "Error saving 3D: ${e.message}")
+        }
+    }
+
+    private fun open3D() {
+        val chooser = JFileChooser()
+        if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+            val file = chooser.selectedFile
+            try {
+                java.io.ObjectInputStream(file.inputStream()).use {
+                    val model = it.readObject() as model.Model3D
+                    val doc = ThreeDDocument(this)
+                    doc.model = model
+                    doc.currentFile = file
+                    threeDDocuments.add(doc)
+                    ThreeDWindow(this, doc).apply { jMenuBar = createMenuBar() }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                JOptionPane.showMessageDialog(null, "Error loading 3D: ${e.message}")
+            }
+        }
+    }
+
     private fun save() {
         activeDocument?.let { doc ->
             val file = doc.currentFile
@@ -556,6 +872,7 @@ class FloorPlanApp {
                             elNode.setAttribute("aboveFloorHeight", el.sillElevation.toString())
                         }
                         if (el is Door) elNode.setAttribute("height3D", el.verticalHeight.toString())
+                        if (el is Room) elNode.setAttribute("floorThickness", el.floorThickness.toString())
                     } else {
                         val verticesStr = el.vertices.joinToString(";") { "${it.x},${it.y}" }
                         elNode.setAttribute("vertices", verticesStr)
@@ -623,7 +940,8 @@ class FloorPlanApp {
                             val y = eElement.getAttribute("y").toInt()
                             val w = eElement.getAttribute("width").toInt()
                             val h = eElement.getAttribute("height").toInt()
-                            Room(x, y, w, h)
+                            val ft = if (eElement.hasAttribute("floorThickness")) eElement.getAttribute("floorThickness").toInt() else 15
+                            Room(x, y, w, h, ft)
                         }
                         ElementType.WINDOW -> {
                             val x = eElement.getAttribute("x").toInt()

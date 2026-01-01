@@ -170,7 +170,7 @@ class FloorPlanDocument(val app: FloorPlanApp) {
         for (el in source) {
             val newEl = when (el) {
                 is Wall -> Wall(el.x, el.y, el.width, el.height)
-                is Room -> Room(el.x, el.y, el.width, el.height)
+                is Room -> Room(el.x, el.y, el.width, el.height, el.floorThickness)
                 is Window -> Window(el.x, el.y, el.width, el.height, el.height3D, el.sillElevation)
                 is Door -> Door(el.x, el.y, el.width, el.height, el.verticalHeight)
                 is Stairs -> Stairs(el.x, el.y, el.width, el.height)

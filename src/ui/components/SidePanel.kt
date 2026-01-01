@@ -172,6 +172,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 dimensionTableModel.addRow(arrayOf("Sill elevation", el.sillElevation))
             }
         }
+        if (el is Room) {
+            dimensionTableModel.addRow(arrayOf("Floor thickness", el.floorThickness))
+        }
 
         // Add blank row
         dimensionTableModel.addRow(arrayOf("", ""))
@@ -249,6 +252,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             "Sill elevation" -> {
                 if (el is PlanWindow) el.sillElevation != doubleVal?.toInt() else false
             }
+            "Floor thickness" -> {
+                if (el is Room) el.floorThickness != doubleVal?.toInt() else false
+            }
             else -> false
         }
 
@@ -266,6 +272,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Sill elevation" -> {
                 if (el is PlanWindow) el.sillElevation = doubleVal!!.toInt()
+            }
+            "Floor thickness" -> {
+                if (el is Room) el.floorThickness = doubleVal!!.toInt()
             }
         }
         

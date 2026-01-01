@@ -25,7 +25,7 @@ abstract class PlanElement(
 }
 
 class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL)
-class Room(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.ROOM)
+class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15) : PlanElement(x, y, width, height, ElementType.ROOM)
 class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var sillElevation: Int = 90) : PlanElement(x, y, width, height, ElementType.WINDOW)
 class Door(x: Int, y: Int, width: Int, height: Int, var verticalHeight: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)
 class Stairs(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.STAIRS)

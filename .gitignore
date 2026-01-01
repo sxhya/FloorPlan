@@ -29,9 +29,12 @@ replay_pid*
 out/
 !**/src/main/**/out/
 !**/src/test/**/out/
+.idea
 
 ### Kotlin ###
 .kotlin
 
 ### Mac OS ###
 .DS_Store
+
+build/
