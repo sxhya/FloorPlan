@@ -16,13 +16,6 @@ abstract class PlanElement(
     val type: ElementType
 ) : Serializable {
     fun getBounds(): Rectangle = Rectangle(x, y, width, height)
-    
-    fun setBounds(newX: Int, newY: Int, newWidth: Int, newHeight: Int) {
-        x = newX
-        y = newY
-        width = newWidth
-        height = newHeight
-    }
 
     open fun contains(px: Int, py: Int): Boolean {
         return getBounds().contains(px.toDouble(), py.toDouble())
@@ -33,7 +26,7 @@ abstract class PlanElement(
 
 class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL)
 class Room(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.ROOM)
-class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150) : PlanElement(x, y, width, height, ElementType.WINDOW)
+class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var aboveFloorHeight: Int = 90) : PlanElement(x, y, width, height, ElementType.WINDOW)
 class Door(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)
 class Stairs(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.STAIRS)
 
