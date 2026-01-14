@@ -8,9 +8,21 @@ import javax.swing.*
 class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
     init {
         doc.window = this
-        title = "3D House Model"
+        title = if (doc.currentFile != null) "3D House Model - ${doc.currentFile?.name}" else "3D House Model"
         setSize(1000, 700)
         
+        defaultCloseOperation = DO_NOTHING_ON_CLOSE
+        addWindowListener(object : java.awt.event.WindowAdapter() {
+            override fun windowClosing(e: java.awt.event.WindowEvent) {
+                app.close3DDocument(doc)
+            }
+            override fun windowActivated(e: java.awt.event.WindowEvent?) {
+                app.activeWindow = this@ThreeDWindow
+                app.activeDocument = null
+                app.updateUndoRedoStates()
+            }
+        })
+
         layout = BorderLayout()
         add(doc.panel, BorderLayout.CENTER)
         

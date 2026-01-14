@@ -29,7 +29,7 @@ import kotlin.math.roundToInt
 class FloorPlanApp {
     private val documents = mutableListOf<FloorPlanDocument>()
     internal var activeDocument: FloorPlanDocument? = null
-    internal var activeWindow: EditorWindow? = null
+    internal var activeWindow: JFrame? = null
     
     internal val sidePanel = SidePanel(this)
     internal val statsPanel = StatisticsPanel(this)
@@ -152,19 +152,64 @@ class FloorPlanApp {
         }
 
         documents.remove(doc)
+        if (activeDocument == doc) activeDocument = null
+        if (activeWindow == doc.window) activeWindow = null
         doc.window?.dispose()
         doc.currentFile?.let { openFiles.remove(it.absolutePath) }
         if (saveImmediately) saveSettings()
     }
 
+    fun close3DDocument(doc: ThreeDDocument, saveImmediately: Boolean = true) {
+        if (doc.isModified) {
+            val result = JOptionPane.showConfirmDialog(
+                doc.window,
+                "Save changes to 3D model ${doc.currentFile?.name ?: "Untitled"}?",
+                "Confirm Close",
+                JOptionPane.YES_NO_CANCEL_OPTION
+            )
+            when (result) {
+                JOptionPane.YES_OPTION -> {
+                    save3D(doc)
+                    if (doc.isModified) return
+                }
+                JOptionPane.NO_OPTION -> {}
+                else -> return
+            }
+        }
+        
+        doc.window?.jMenuBar?.let { bar ->
+            menuBars.remove(bar)
+            for (i in 0 until bar.menuCount) {
+                val menu = bar.getMenu(i)
+                if (menu?.text == "File") {
+                    for (j in 0 until menu.itemCount) {
+                        val item = menu.getItem(j)
+                        if (item is JMenu && item.text == "Recent Files") {
+                            recentMenus.remove(item)
+                        }
+                    }
+                }
+            }
+        }
+
+        threeDDocuments.remove(doc)
+        if (activeWindow == doc.window) activeWindow = null
+        doc.window?.dispose()
+        if (saveImmediately) saveSettings()
+    }
+
     fun quitApp() {
-        val docsToSave = documents.toList()
         val docsToClose = documents.toList()
+        val threedToClose = threeDDocuments.toList()
+        // Save settings with the current open documents BEFORE closing them
+        saveSettings(docsToClose, threedToClose)
         for (doc in docsToClose) {
             closeDocument(doc, saveImmediately = false)
         }
-        if (documents.isEmpty()) {
-            saveSettings(docsToSave)
+        for (doc in threedToClose) {
+            close3DDocument(doc, saveImmediately = false)
+        }
+        if (documents.isEmpty() && threeDDocuments.isEmpty()) {
             System.exit(0)
         }
     }
@@ -254,12 +299,12 @@ class FloorPlanApp {
         }
     }
 
-    private fun saveSettings(docsToPersist: List<FloorPlanDocument>? = null) {
+    private fun saveSettings(docsToPersist: List<FloorPlanDocument>? = null, threeDDocsToPersist: List<ThreeDDocument>? = null) {
         val props = java.util.Properties()
         if (lastDirectory != null) props.setProperty("lastDirectory", lastDirectory)
         props.setProperty("recentFiles", recentFiles.joinToString(";"))
         
-        // Save currently open documents that have a file with their relative positions
+        // Save currently open floor plan documents that have a file with their relative positions
         val docs = docsToPersist ?: documents
         val currentOpen = docs.mapNotNull { doc ->
             doc.currentFile?.let { file ->
@@ -273,8 +318,26 @@ class FloorPlanApp {
                     file.absolutePath
                 }
             }
-        }.distinct()
-        props.setProperty("openFiles", currentOpen.joinToString(";"))
+        }.toMutableList()
+        
+        // Save currently open 3D documents that have a file with their relative positions
+        val threeDDocs = threeDDocsToPersist ?: threeDDocuments
+        val threeDOpen = threeDDocs.mapNotNull { doc ->
+            doc.currentFile?.let { file ->
+                val window = doc.window
+                val sideWindow = sidePanelWindow
+                if (window != null && sideWindow != null) {
+                    val relX = window.x - sideWindow.x
+                    val relY = window.y - sideWindow.y
+                    "${file.absolutePath}|$relX,$relY,${window.width},${window.height},${doc.scale},${doc.rotationX},${doc.rotationZ}"
+                } else {
+                    file.absolutePath
+                }
+            }
+        }
+        currentOpen.addAll(threeDOpen)
+        
+        props.setProperty("openFiles", currentOpen.distinct().joinToString(";"))
         
         sidePanelWindow?.let {
             props.setProperty("sidePanelX", it.x.toString())
@@ -330,10 +393,12 @@ class FloorPlanApp {
         
         val openItem = JMenuItem("Open")
         openItem.addActionListener { 
-            val options = arrayOf("Floor Plan (XML)", "3D Model (.3d)")
-            val choice = JOptionPane.showOptionDialog(null, "Select file type to open", "Open", JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0])
-            if (choice == 0) openFromXML()
-            else if (choice == 1) open3D()
+            val chooser = JFileChooser()
+            chooser.isMultiSelectionEnabled = true
+            lastDirectory?.let { chooser.currentDirectory = File(it) }
+            if (chooser.showOpenDialog(activeWindow) == JFileChooser.APPROVE_OPTION) {
+                chooser.selectedFiles.forEach { openFile(it) }
+            }
         }
         fileMenu.add(openItem)
         
@@ -499,7 +564,11 @@ class FloorPlanApp {
         val model3d = model.Model3D()
         var currentZ = 0.0
 
+        val doc3d = ThreeDDocument(this)
         for (floor in floors) {
+            val floorPath = floor.doc.currentFile?.absolutePath ?: ""
+            doc3d.floors.add(ThreeDDocument.FloorData(floorPath, floor.height))
+
             val floorHeight = floor.height.toDouble()
             for (el in floor.doc.elements) {
                 when (el) {
@@ -663,8 +732,8 @@ class FloorPlanApp {
             currentZ += floorHeight
         }
 
-        val doc3d = ThreeDDocument(this)
         doc3d.model = model3d
+        doc3d.isModified = true
         threeDDocuments.add(doc3d)
         val window = ThreeDWindow(this, doc3d)
         window.jMenuBar = createMenuBar()
@@ -784,8 +853,8 @@ class FloorPlanApp {
         val chooser = JFileChooser()
         if (chooser.showSaveDialog(null) == JFileChooser.APPROVE_OPTION) {
             var file = chooser.selectedFile
-            if (!file.name.endsWith(".3d")) {
-                file = File(file.absolutePath + ".3d")
+            if (!file.name.endsWith(".xml")) {
+                file = File(file.absolutePath + ".xml")
             }
             performSave3D(doc, file)
         }
@@ -793,37 +862,37 @@ class FloorPlanApp {
 
     private fun performSave3D(doc: ThreeDDocument, file: File) {
         try {
-            java.io.ObjectOutputStream(file.outputStream()).use {
-                it.writeObject(doc.model)
+            val docFactory = DocumentBuilderFactory.newInstance()
+            val docBuilder = docFactory.newDocumentBuilder()
+            val xmlDoc = docBuilder.newDocument()
+
+            val rootElement = xmlDoc.createElement("ThreeDModel")
+            xmlDoc.appendChild(rootElement)
+
+            for (floor in doc.floors) {
+                val floorNode = xmlDoc.createElement("Floor")
+                floorNode.setAttribute("path", floor.filePath)
+                floorNode.setAttribute("height", floor.height.toString())
+                rootElement.appendChild(floorNode)
             }
+
+            val transformerFactory = TransformerFactory.newInstance()
+            val transformer = transformerFactory.newTransformer()
+            transformer.setOutputProperty(OutputKeys.INDENT, "yes")
+            val source = DOMSource(xmlDoc)
+            val result = StreamResult(file)
+            transformer.transform(source, result)
+
             doc.currentFile = file
             doc.isModified = false
-            // addToRecent(file) // For now don't mix with floor plans
+            doc.window?.title = "3D House Model - ${file.name}"
+            addToRecent(file)
         } catch (e: Exception) {
             e.printStackTrace()
-            JOptionPane.showMessageDialog(null, "Error saving 3D: ${e.message}")
+            JOptionPane.showMessageDialog(null, "Error saving 3D XML: ${e.message}")
         }
     }
 
-    private fun open3D() {
-        val chooser = JFileChooser()
-        if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-            val file = chooser.selectedFile
-            try {
-                java.io.ObjectInputStream(file.inputStream()).use {
-                    val model = it.readObject() as model.Model3D
-                    val doc = ThreeDDocument(this)
-                    doc.model = model
-                    doc.currentFile = file
-                    threeDDocuments.add(doc)
-                    ThreeDWindow(this, doc).apply { jMenuBar = createMenuBar() }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                JOptionPane.showMessageDialog(null, "Error loading 3D: ${e.message}")
-            }
-        }
-    }
 
     private fun save() {
         activeDocument?.let { doc ->
@@ -833,6 +902,9 @@ class FloorPlanApp {
             } else {
                 performSave(file)
             }
+        }
+        threeDDocuments.find { it.window == activeWindow }?.let { doc ->
+            save3D(doc)
         }
     }
 
@@ -846,6 +918,9 @@ class FloorPlanApp {
                 }
                 performSave(file)
             }
+        }
+        threeDDocuments.find { it.window == activeWindow }?.let { doc ->
+            saveAs3D(doc)
         }
     }
 
@@ -889,7 +964,7 @@ class FloorPlanApp {
                 transformer.transform(source, result)
                 doc.currentFile = file
                 doc.isModified = false
-                activeWindow?.updateTitle()
+                (activeWindow as? EditorWindow)?.updateTitle()
                 addToRecent(file)
                 if (!openFiles.contains(file.absolutePath)) {
                     openFiles.add(file.absolutePath)
@@ -911,81 +986,136 @@ class FloorPlanApp {
         }
     }
 
+    private fun parseFloorElements(xmlDoc: org.w3c.dom.Document): List<PlanElement> {
+        val nList = xmlDoc.getElementsByTagName("Element")
+        val newElements = mutableListOf<PlanElement>()
+        for (i in 0 until nList.length) {
+            val node = nList.item(i)
+            if (node.nodeType == org.w3c.dom.Node.ELEMENT_NODE) {
+                val eElement = node as Element
+                val type = ElementType.valueOf(eElement.getAttribute("type"))
+
+                val el = when (type) {
+                    ElementType.WALL -> {
+                        val x = eElement.getAttribute("x").toInt()
+                        val y = eElement.getAttribute("y").toInt()
+                        val w = eElement.getAttribute("width").toInt()
+                        val h = eElement.getAttribute("height").toInt()
+                        Wall(x, y, w, h)
+                    }
+                    ElementType.ROOM -> {
+                        val x = eElement.getAttribute("x").toInt()
+                        val y = eElement.getAttribute("y").toInt()
+                        val w = eElement.getAttribute("width").toInt()
+                        val h = eElement.getAttribute("height").toInt()
+                        val ft = if (eElement.hasAttribute("floorThickness")) eElement.getAttribute("floorThickness").toInt() else 15
+                        Room(x, y, w, h, ft)
+                    }
+                    ElementType.WINDOW -> {
+                        val x = eElement.getAttribute("x").toInt()
+                        val y = eElement.getAttribute("y").toInt()
+                        val w = eElement.getAttribute("width").toInt()
+                        val h = eElement.getAttribute("height").toInt()
+                        val h3d = if (eElement.hasAttribute("height3D")) eElement.getAttribute("height3D").toInt() else 150
+                        val afh = if (eElement.hasAttribute("aboveFloorHeight")) eElement.getAttribute("aboveFloorHeight").toInt() else 90
+                        PlanWindow(x, y, w, h, h3d, afh)
+                    }
+                    ElementType.DOOR -> {
+                        val x = eElement.getAttribute("x").toInt()
+                        val y = eElement.getAttribute("y").toInt()
+                        val w = eElement.getAttribute("width").toInt()
+                        val h = eElement.getAttribute("height").toInt()
+                        val h3d = if (eElement.hasAttribute("height3D")) eElement.getAttribute("height3D").toInt() else 210
+                        Door(x, y, w, h, h3d)
+                    }
+                    ElementType.STAIRS -> {
+                        val x = eElement.getAttribute("x").toInt()
+                        val y = eElement.getAttribute("y").toInt()
+                        val w = eElement.getAttribute("width").toInt()
+                        val h = eElement.getAttribute("height").toInt()
+                        Stairs(x, y, w, h)
+                    }
+                    ElementType.FLOOR_OPENING -> {
+                        val vertices = mutableListOf<Point>()
+                        val verticesStr = eElement.getAttribute("vertices")
+                        if (verticesStr.isNotEmpty()) {
+                            verticesStr.split(";").forEach {
+                                val pts = it.split(",")
+                                if (pts.size == 2) {
+                                    vertices.add(Point(pts[0].toInt(), pts[1].toInt()))
+                                }
+                            }
+                        }
+                        val es = FloorOpening(vertices)
+                        es.updateBounds()
+                        es
+                    }
+                }
+                newElements.add(el)
+            }
+        }
+        return newElements
+    }
+
     private fun openFile(file: File, savedState: WindowState? = null) {
         try {
             val docFactory = DocumentBuilderFactory.newInstance()
             val docBuilder = docFactory.newDocumentBuilder()
             val xmlDoc = docBuilder.parse(file)
-            
             xmlDoc.documentElement.normalize()
-            val nList = xmlDoc.getElementsByTagName("Element")
-            
-            val newElements = mutableListOf<PlanElement>()
-            for (i in 0 until nList.length) {
-                val node = nList.item(i)
-                if (node.nodeType == org.w3c.dom.Node.ELEMENT_NODE) {
-                    val eElement = node as Element
-                    val type = ElementType.valueOf(eElement.getAttribute("type"))
+
+            if (xmlDoc.documentElement.nodeName == "ThreeDModel") {
+                val floors = mutableListOf<FloorInfo>()
+                val floorNodes = xmlDoc.getElementsByTagName("Floor")
+                val floorDataList = mutableListOf<ThreeDDocument.FloorData>()
+                for (i in 0 until floorNodes.length) {
+                    val floorNode = floorNodes.item(i) as Element
+                    val path = floorNode.getAttribute("path")
+                    val height = floorNode.getAttribute("height").toInt()
+                    floorDataList.add(ThreeDDocument.FloorData(path, height))
                     
-                    val el = when (type) {
-                        ElementType.WALL -> {
-                            val x = eElement.getAttribute("x").toInt()
-                            val y = eElement.getAttribute("y").toInt()
-                            val w = eElement.getAttribute("width").toInt()
-                            val h = eElement.getAttribute("height").toInt()
-                            Wall(x, y, w, h)
-                        }
-                        ElementType.ROOM -> {
-                            val x = eElement.getAttribute("x").toInt()
-                            val y = eElement.getAttribute("y").toInt()
-                            val w = eElement.getAttribute("width").toInt()
-                            val h = eElement.getAttribute("height").toInt()
-                            val ft = if (eElement.hasAttribute("floorThickness")) eElement.getAttribute("floorThickness").toInt() else 15
-                            Room(x, y, w, h, ft)
-                        }
-                        ElementType.WINDOW -> {
-                            val x = eElement.getAttribute("x").toInt()
-                            val y = eElement.getAttribute("y").toInt()
-                            val w = eElement.getAttribute("width").toInt()
-                            val h = eElement.getAttribute("height").toInt()
-                            val h3d = if (eElement.hasAttribute("height3D")) eElement.getAttribute("height3D").toInt() else 150
-                            val afh = if (eElement.hasAttribute("aboveFloorHeight")) eElement.getAttribute("aboveFloorHeight").toInt() else 90
-                            PlanWindow(x, y, w, h, h3d, afh)
-                        }
-                        ElementType.DOOR -> {
-                            val x = eElement.getAttribute("x").toInt()
-                            val y = eElement.getAttribute("y").toInt()
-                            val w = eElement.getAttribute("width").toInt()
-                            val h = eElement.getAttribute("height").toInt()
-                            val h3d = if (eElement.hasAttribute("height3D")) eElement.getAttribute("height3D").toInt() else 210
-                            Door(x, y, w, h, h3d)
-                        }
-                        ElementType.STAIRS -> {
-                            val x = eElement.getAttribute("x").toInt()
-                            val y = eElement.getAttribute("y").toInt()
-                            val w = eElement.getAttribute("width").toInt()
-                            val h = eElement.getAttribute("height").toInt()
-                            Stairs(x, y, w, h)
-                        }
-                        ElementType.FLOOR_OPENING -> {
-                            val vertices = mutableListOf<Point>()
-                            val verticesStr = eElement.getAttribute("vertices")
-                            if (verticesStr.isNotEmpty()) {
-                                verticesStr.split(";").forEach {
-                                    val pts = it.split(",")
-                                    if (pts.size == 2) {
-                                        vertices.add(Point(pts[0].toInt(), pts[1].toInt()))
-                                    }
-                                }
+                    val floorFile = File(path)
+                    if (floorFile.exists()) {
+                        val floorXmlDoc = docBuilder.parse(floorFile)
+                        floorXmlDoc.documentElement.normalize()
+                        val floorElements = parseFloorElements(floorXmlDoc)
+                        val floorDoc = FloorPlanDocument(this)
+                        floorDoc.elements.addAll(floorElements)
+                        floorDoc.currentFile = floorFile
+                        floors.add(FloorInfo(floorDoc, height))
+                    } else {
+                        JOptionPane.showMessageDialog(null, "Floor plan file not found: $path")
+                    }
+                }
+                
+                if (floors.isNotEmpty()) {
+                    generate3DModel(floors)
+                    val doc3d = threeDDocuments.last()
+                    doc3d.currentFile = file
+                    doc3d.isModified = false
+                    doc3d.floors.clear()
+                    doc3d.floors.addAll(floorDataList)
+                    doc3d.window?.title = "3D House Model - ${file.name}"
+                    
+                    // Restore window state for 3D document
+                    if (savedState != null) {
+                        doc3d.scale = savedState.scale
+                        doc3d.rotationX = savedState.offsetX // offsetX stores rotationX for 3D docs
+                        doc3d.rotationZ = savedState.offsetY // offsetY stores rotationZ for 3D docs
+                        doc3d.window?.let { window ->
+                            window.setSize(savedState.size.width, savedState.size.height)
+                            sidePanelWindow?.let { sideWindow ->
+                                window.setLocation(sideWindow.x + savedState.pos.x, sideWindow.y + savedState.pos.y)
                             }
-                            val es = FloorOpening(vertices)
-                            es.updateBounds()
-                            es
                         }
                     }
-                    newElements.add(el)
+                    
+                    addToRecent(file)
                 }
+                return
             }
+            
+            val newElements = parseFloorElements(xmlDoc)
             
             val doc = FloorPlanDocument(this)
             doc.elements.addAll(newElements)

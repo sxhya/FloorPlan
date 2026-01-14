@@ -11,6 +11,10 @@ class ThreeDDocument(val app: FloorPlanApp) {
     
     var isModified = false
     
+    // Original data for 3D model XML
+    data class FloorData(val filePath: String, val height: Int)
+    val floors = mutableListOf<FloorData>()
+    
     // View state
     var rotationX = 30.0 // tilt (0 side, 90 top)
     var rotationZ = 45.0 // turn around Z
