@@ -15,6 +15,7 @@ data class Rect3D(
 
 class Model3D : Serializable {
     val rects = mutableListOf<Rect3D>()
+    val lightPositions = mutableListOf<Vector3D>() // Point light sources at room centers
 
     fun getBounds(): Pair<Vector3D, Vector3D> {
         if (rects.isEmpty()) return Vector3D(0.0, 0.0, 0.0) to Vector3D(0.0, 0.0, 0.0)

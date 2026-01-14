@@ -580,6 +580,12 @@ class FloorPlanApp {
                         val y2 = (el.y + el.height).toDouble()
                         val thickness = el.floorThickness.toDouble()
                         
+                        // Add a point light at the center of the room (200cm above floor)
+                        val lightX = (x1 + x2) / 2.0
+                        val lightY = (y1 + y2) / 2.0
+                        val lightZ = currentZ + 200.0 // 200cm above floor level
+                        model3d.lightPositions.add(Vector3D(lightX, lightY, lightZ))
+                        
                         // Top face (floor surface at currentZ)
                         model3d.rects.add(Rect3D(
                             Vector3D(x1, y1, currentZ), Vector3D(x2, y1, currentZ),
