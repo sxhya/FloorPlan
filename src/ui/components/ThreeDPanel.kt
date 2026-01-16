@@ -11,6 +11,7 @@ import javafx.scene.shape.TriangleMesh
 import javafx.scene.transform.Rotate
 import javafx.scene.transform.Translate
 import model.Rect3D
+import model.Triangle3D
 import model.Vector3D
 import ui.ThreeDDocument
 import java.awt.event.KeyEvent
@@ -151,6 +152,9 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val regularMeshViews = doc.model.rects.filter { !it.isWindow }.map { rect ->
             createRectMeshView(rect)
         }
+        val triangleMeshViews = doc.model.triangles.map { tri ->
+            createTriangleMeshView(tri)
+        }
         val windowMeshViews = doc.model.rects.filter { it.isWindow }.map { rect ->
             createRectMeshView(rect)
         }
@@ -158,6 +162,7 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         Platform.runLater {
             modelGroup?.children?.clear()
             modelGroup?.children?.addAll(regularMeshViews)
+            modelGroup?.children?.addAll(triangleMeshViews)
             
             // Keep the window ambient light, clear only meshes, then re-add windows
             windowGroup?.children?.removeIf { it !is AmbientLight }
@@ -235,6 +240,39 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         material.specularColor = JFXColor.BLACK
         // Windows are added to a separate group with their own always-on ambient light,
         // so they remain visible regardless of the daylight setting
+        meshView.material = material
+        meshView.cullFace = CullFace.NONE
+        
+        return meshView
+    }
+    
+    private fun createTriangleMeshView(tri: Triangle3D): MeshView {
+        val mesh = TriangleMesh()
+        
+        // Mapping: Model(x, y, z) -> FX(-x, -z, y) with X mirrored
+        fun toFX(v: Vector3D) = floatArrayOf((-v.x).toFloat(), (-v.z).toFloat(), v.y.toFloat())
+        
+        val p1 = toFX(tri.v1)
+        val p2 = toFX(tri.v2)
+        val p3 = toFX(tri.v3)
+        
+        mesh.points.addAll(*p1)
+        mesh.points.addAll(*p2)
+        mesh.points.addAll(*p3)
+        
+        mesh.texCoords.addAll(0f, 0f)
+        
+        // Single triangle
+        mesh.faces.addAll(
+            0, 0, 1, 0, 2, 0
+        )
+        
+        val meshView = MeshView(mesh)
+        val material = PhongMaterial()
+        val awtColor = tri.color
+        val fxColor = JFXColor.rgb(awtColor.red, awtColor.green, awtColor.blue, awtColor.alpha / 255.0)
+        material.diffuseColor = fxColor
+        material.specularColor = JFXColor.BLACK
         meshView.material = material
         meshView.cullFace = CullFace.NONE
         

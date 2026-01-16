@@ -55,7 +55,7 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
         val windows = doc.elements.filterIsInstance<PlanWindow>()
         val doors = doc.elements.filterIsInstance<Door>()
         val unusable = doc.elements.filter { it is Stairs }
-        val emptySpaces = doc.elements.filterIsInstance<FloorOpening>()
+        val polygonRooms = doc.elements.filterIsInstance<PolygonRoom>()
         
         problematicElements.clear()
 
@@ -69,14 +69,15 @@ class StatisticsPanel(private val app: FloorPlanApp) : JPanel() {
         for (room in rooms) {
             totalRoomArea += room.width.toDouble() * room.height.toDouble()
         }
+        // Include polygon rooms in total room area calculation
+        for (pr in polygonRooms) {
+            totalRoomArea += pr.getArea()
+        }
         roomAreaLabel.text = "Total Room Area: %.2f m²".format(totalRoomArea / 10000.0)
 
         var totalUnusableArea = 0.0
         for (u in unusable) {
             totalUnusableArea += u.getArea()
-        }
-        for (es in emptySpaces) {
-            totalUnusableArea += es.getArea()
         }
         unusableAreaLabel.text = "Unusable Area: %.2f m²".format(totalUnusableArea / 10000.0)
 

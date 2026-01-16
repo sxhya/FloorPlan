@@ -45,7 +45,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             val row = polygonTable.selectedRow
             if (row != -1) {
                 val doc = app.activeDocument ?: return@addActionListener
-                val es = doc.selectedElement as? FloorOpening ?: return@addActionListener
+                val es = doc.selectedElement as? PolygonRoom ?: return@addActionListener
                 doc.saveState()
                 val v = es.vertices[row]
                 es.vertices.add(row + 1, Point(v.x + 10, v.y + 10))
@@ -62,7 +62,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             val row = polygonTable.selectedRow
             if (row != -1) {
                 val doc = app.activeDocument ?: return@addActionListener
-                val es = doc.selectedElement as? FloorOpening ?: return@addActionListener
+                val es = doc.selectedElement as? PolygonRoom ?: return@addActionListener
                 if (es.vertices.size > 3) {
                     doc.saveState()
                     es.vertices.removeAt(row)
@@ -90,7 +90,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         polygonTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
                 val doc = app.activeDocument ?: return@addTableModelListener
-                val es = doc.selectedElement as? FloorOpening ?: return@addTableModelListener
+                val es = doc.selectedElement as? PolygonRoom ?: return@addTableModelListener
                 val row = e.firstRow
                 val col = e.column
                 val value = polygonTableModel.getValueAt(row, col).toString().toIntOrNull()
@@ -126,10 +126,10 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                     Stairs(centerX - 40, centerY - 20, 80, 40)
                 }
             }
-            ElementType.FLOOR_OPENING -> {
+            ElementType.POLYGON_ROOM -> {
                 // This can now be triggered from empty space popup
                 doc.currentMode = AppMode.RULER
-                doc.canvas.isCreatingFloorOpening = true
+                doc.canvas.isCreatingPolygonRoom = true
                 doc.canvas.rulerMarkers.clear()
                 doc.canvas.rulerClosed = false
                 doc.canvas.rulerProbeEnabled = true
@@ -175,6 +175,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         if (el is Room) {
             dimensionTableModel.addRow(arrayOf("Floor thickness", el.floorThickness))
         }
+        if (el is PolygonRoom) {
+            dimensionTableModel.addRow(arrayOf("Floor thickness", el.floorThickness))
+        }
 
         // Add blank row
         dimensionTableModel.addRow(arrayOf("", ""))
@@ -199,7 +202,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             dimensionTableModel.addRow(arrayOf("Opening Volume", "%.2f m³".format(opVol / 1000000.0)))
         }
 
-        if (el is FloorOpening) {
+        if (el is PolygonRoom) {
             polygonTableModel.setRowCount(0)
             el.vertices.forEachIndexed { index, point ->
                 polygonTableModel.addRow(arrayOf(index + 1, point.x, point.y))
@@ -253,7 +256,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 if (el is PlanWindow) el.sillElevation != doubleVal?.toInt() else false
             }
             "Floor thickness" -> {
-                if (el is Room) el.floorThickness != doubleVal?.toInt() else false
+                if (el is Room) el.floorThickness != doubleVal?.toInt() 
+                else if (el is PolygonRoom) el.floorThickness != doubleVal?.toInt()
+                else false
             }
             else -> false
         }
@@ -275,10 +280,11 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Floor thickness" -> {
                 if (el is Room) el.floorThickness = doubleVal!!.toInt()
+                if (el is PolygonRoom) el.floorThickness = doubleVal!!.toInt()
             }
         }
         
-        if (el is FloorOpening) el.updateBounds()
+        if (el is PolygonRoom) el.updateBounds()
         
         doc.canvas.repaint()
         app.statsPanel.update()

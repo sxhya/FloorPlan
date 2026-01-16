@@ -13,12 +13,20 @@ data class Rect3D(
     val isWindow: Boolean = false
 ) : Serializable
 
+data class Triangle3D(
+    val v1: Vector3D,
+    val v2: Vector3D,
+    val v3: Vector3D,
+    val color: java.awt.Color
+) : Serializable
+
 class Model3D : Serializable {
     val rects = mutableListOf<Rect3D>()
+    val triangles = mutableListOf<Triangle3D>()
     val lightPositions = mutableListOf<Vector3D>()
 
     fun getBounds(): Pair<Vector3D, Vector3D> {
-        if (rects.isEmpty()) return Vector3D(0.0, 0.0, 0.0) to Vector3D(0.0, 0.0, 0.0)
+        if (rects.isEmpty() && triangles.isEmpty()) return Vector3D(0.0, 0.0, 0.0) to Vector3D(0.0, 0.0, 0.0)
         var minX = Double.MAX_VALUE
         var minY = Double.MAX_VALUE
         var minZ = Double.MAX_VALUE
@@ -28,6 +36,16 @@ class Model3D : Serializable {
 
         for (rect in rects) {
             for (v in listOf(rect.v1, rect.v2, rect.v3, rect.v4)) {
+                minX = minOf(minX, v.x)
+                minY = minOf(minY, v.y)
+                minZ = minOf(minZ, v.z)
+                maxX = maxOf(maxX, v.x)
+                maxY = maxOf(maxY, v.y)
+                maxZ = maxOf(maxZ, v.z)
+            }
+        }
+        for (tri in triangles) {
+            for (v in listOf(tri.v1, tri.v2, tri.v3)) {
                 minX = minOf(minX, v.x)
                 minY = minOf(minY, v.y)
                 minZ = minOf(minZ, v.z)

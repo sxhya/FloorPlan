@@ -5,7 +5,7 @@ import java.awt.Rectangle
 import java.io.Serializable
 
 enum class ElementType {
-    WALL, ROOM, WINDOW, DOOR, STAIRS, FLOOR_OPENING
+    WALL, ROOM, WINDOW, DOOR, STAIRS, POLYGON_ROOM
 }
 
 abstract class PlanElement(
@@ -30,7 +30,7 @@ class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, v
 class Door(x: Int, y: Int, width: Int, height: Int, var verticalHeight: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)
 class Stairs(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.STAIRS)
 
-class FloorOpening(val vertices: MutableList<Point>) : PlanElement(0, 0, 0, 0, ElementType.FLOOR_OPENING) {
+class PolygonRoom(val vertices: MutableList<Point>, var floorThickness: Int = 15) : PlanElement(0, 0, 0, 0, ElementType.POLYGON_ROOM) {
     init {
         updateBounds()
     }

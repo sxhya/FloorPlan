@@ -136,19 +136,152 @@ class FloorPlanDocument(val app: FloorPlanApp) {
     }
 
     fun calculateIntersections(): List<IntersectionInfo> {
-        val candidates = elements.filter { it is Wall || it is Room }
+        val candidates = elements.filter { it is Wall || it is Room || it is PolygonRoom }
         val intersections = mutableListOf<IntersectionInfo>()
         for (i in candidates.indices) {
             for (j in i + 1 until candidates.size) {
-                val r1 = candidates[i].getBounds()
-                val r2 = candidates[j].getBounds()
-                val intersection = r1.intersection(r2)
-                if (!intersection.isEmpty) {
-                    intersections.add(IntersectionInfo(candidates[i], candidates[j], intersection))
+                val el1 = candidates[i]
+                val el2 = candidates[j]
+                
+                // Get polygons for both elements
+                val poly1 = getElementPolygon(el1)
+                val poly2 = getElementPolygon(el2)
+                
+                // Check if polygons intersect
+                val intersectionPoly = computePolygonIntersection(poly1, poly2)
+                if (intersectionPoly.isNotEmpty()) {
+                    // Only count intersections with nonzero area
+                    val area = computePolygonArea(intersectionPoly)
+                    if (area > 0.0) {
+                        // Use bounding box of intersection for display
+                        val bounds = getPolygonBounds(intersectionPoly)
+                        intersections.add(IntersectionInfo(el1, el2, bounds))
+                    }
                 }
             }
         }
         return intersections
+    }
+    
+    private fun getElementPolygon(el: PlanElement): List<Point> {
+        return when (el) {
+            is PolygonRoom -> el.vertices.toList()
+            else -> {
+                // Convert rectangular element to 4-vertex polygon
+                val b = el.getBounds()
+                listOf(
+                    Point(b.x, b.y),
+                    Point(b.x + b.width, b.y),
+                    Point(b.x + b.width, b.y + b.height),
+                    Point(b.x, b.y + b.height)
+                )
+            }
+        }
+    }
+    
+    private fun getPolygonBounds(poly: List<Point>): Rectangle {
+        if (poly.isEmpty()) return Rectangle()
+        var minX = Int.MAX_VALUE
+        var minY = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE
+        var maxY = Int.MIN_VALUE
+        for (p in poly) {
+            minX = minOf(minX, p.x)
+            minY = minOf(minY, p.y)
+            maxX = maxOf(maxX, p.x)
+            maxY = maxOf(maxY, p.y)
+        }
+        return Rectangle(minX, minY, maxX - minX, maxY - minY)
+    }
+    
+    private fun computePolygonArea(poly: List<Point>): Double {
+        if (poly.size < 3) return 0.0
+        var area = 0.0
+        for (i in poly.indices) {
+            val j = (i + 1) % poly.size
+            area += poly[i].x.toDouble() * poly[j].y.toDouble()
+            area -= poly[j].x.toDouble() * poly[i].y.toDouble()
+        }
+        return kotlin.math.abs(area) / 2.0
+    }
+    
+    private fun computePolygonIntersection(poly1: List<Point>, poly2: List<Point>): List<Point> {
+        // Sutherland-Hodgman algorithm for polygon clipping
+        // Requires both polygons to have consistent winding order (counter-clockwise)
+        if (poly1.size < 3 || poly2.size < 3) return emptyList()
+        
+        // Ensure both polygons are in counter-clockwise order
+        val ccwPoly1 = ensureCounterClockwise(poly1)
+        val ccwPoly2 = ensureCounterClockwise(poly2)
+        
+        var outputList = ccwPoly1.toMutableList()
+        
+        for (i in ccwPoly2.indices) {
+            if (outputList.isEmpty()) break
+            
+            val edgeStart = ccwPoly2[i]
+            val edgeEnd = ccwPoly2[(i + 1) % ccwPoly2.size]
+            
+            val inputList = outputList.toList()
+            outputList.clear()
+            
+            if (inputList.isEmpty()) break
+            
+            var prevPoint = inputList.last()
+            for (currentPoint in inputList) {
+                if (isInsideEdge(currentPoint, edgeStart, edgeEnd)) {
+                    if (!isInsideEdge(prevPoint, edgeStart, edgeEnd)) {
+                        val intersection = lineIntersection(prevPoint, currentPoint, edgeStart, edgeEnd)
+                        if (intersection != null) outputList.add(intersection)
+                    }
+                    outputList.add(currentPoint)
+                } else if (isInsideEdge(prevPoint, edgeStart, edgeEnd)) {
+                    val intersection = lineIntersection(prevPoint, currentPoint, edgeStart, edgeEnd)
+                    if (intersection != null) outputList.add(intersection)
+                }
+                prevPoint = currentPoint
+            }
+        }
+        
+        return outputList
+    }
+    
+    private fun ensureCounterClockwise(poly: List<Point>): List<Point> {
+        // Calculate signed area to determine winding order
+        // Positive = counter-clockwise, Negative = clockwise
+        var signedArea = 0.0
+        for (i in poly.indices) {
+            val j = (i + 1) % poly.size
+            signedArea += poly[i].x.toDouble() * poly[j].y.toDouble()
+            signedArea -= poly[j].x.toDouble() * poly[i].y.toDouble()
+        }
+        // If clockwise (negative area), reverse the polygon
+        return if (signedArea < 0) poly.reversed() else poly
+    }
+    
+    private fun isInsideEdge(p: Point, edgeStart: Point, edgeEnd: Point): Boolean {
+        // Check if point is on the left side of the edge (inside the polygon for CCW winding)
+        return (edgeEnd.x - edgeStart.x) * (p.y - edgeStart.y) - (edgeEnd.y - edgeStart.y) * (p.x - edgeStart.x) >= 0
+    }
+    
+    private fun lineIntersection(p1: Point, p2: Point, p3: Point, p4: Point): Point? {
+        val d1x = (p2.x - p1.x).toDouble()
+        val d1y = (p2.y - p1.y).toDouble()
+        val d2x = (p4.x - p3.x).toDouble()
+        val d2y = (p4.y - p3.y).toDouble()
+        
+        val cross = d1x * d2y - d1y * d2x
+        if (kotlin.math.abs(cross) < 1e-10) return null
+        
+        val dx = (p3.x - p1.x).toDouble()
+        val dy = (p3.y - p1.y).toDouble()
+        
+        val t = (dx * d2y - dy * d2x) / cross
+        
+        return Point(
+            (p1.x + t * d1x).roundToInt(),
+            (p1.y + t * d1y).roundToInt()
+        )
     }
 
     fun findContainingWall(x: Int, y: Int, w: Int, h: Int): Wall? {
@@ -161,10 +294,6 @@ class FloorPlanDocument(val app: FloorPlanApp) {
         return elements.filterIsInstance<Room>().find { it.getBounds().contains(rect) }
     }
 
-    fun findContainingRoomForFloorOpening(es: FloorOpening): Room? {
-        return elements.filterIsInstance<Room>().find { it.getBounds().contains(es.getBounds()) }
-    }
-
     private fun cloneElements(source: List<PlanElement>): List<PlanElement> {
         val cloned = mutableListOf<PlanElement>()
         for (el in source) {
@@ -174,7 +303,7 @@ class FloorPlanDocument(val app: FloorPlanApp) {
                 is Window -> Window(el.x, el.y, el.width, el.height, el.height3D, el.sillElevation)
                 is Door -> Door(el.x, el.y, el.width, el.height, el.verticalHeight)
                 is Stairs -> Stairs(el.x, el.y, el.width, el.height)
-                is FloorOpening -> FloorOpening(el.vertices.map { Point(it.x, it.y) }.toMutableList())
+                is PolygonRoom -> PolygonRoom(el.vertices.map { Point(it.x, it.y) }.toMutableList(), el.floorThickness)
                 else -> null
             }
             newEl?.let { cloned.add(it) }

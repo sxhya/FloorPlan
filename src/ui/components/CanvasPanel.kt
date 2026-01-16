@@ -15,7 +15,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         private var initialElementBounds: Rectangle? = null
         private var initialVertices: List<Point>? = null
         private var elementsToMoveWithWall = mutableListOf<Pair<PlanElement, Point>>()
-        private var initialChildrenVertices = mutableListOf<Pair<FloorOpening, List<Point>>>()
+        private var initialChildrenVertices = mutableListOf<Pair<PolygonRoom, List<Point>>>()
         private val STICK_THRESHOLD = 10
         
         private var panStart: Point? = null
@@ -33,7 +33,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         var rulerProbePoint: Point? = null // model cm
         var rulerClosed = false
         var rulerProbeEnabled = true
-        var isCreatingFloorOpening = false
+        var isCreatingPolygonRoom = false
 
         private var vertexBeingDraggedIndex = -1
         private var hasChangedDuringInteraction = false
@@ -41,7 +41,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         private fun getHandleUnderMouse(p: Point): Any {
             val el = doc.selectedElement ?: return ResizeHandle.NONE
             
-            if (el is FloorOpening) {
+            if (el is PolygonRoom) {
                 val r = HANDLE_SIZE
                 for (i in el.vertices.indices) {
                     val v = el.vertices[i]
@@ -131,7 +131,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                             rulerMarkers.clear()
                             rulerClosed = false
                             rulerProbeEnabled = true
-                            isCreatingFloorOpening = false
+                            isCreatingPolygonRoom = false
                             doc.currentMode = AppMode.NORMAL
                             doc.window!!.normalBtn.isSelected = true
                         } else if (SwingUtilities.isLeftMouseButton(e)) {
@@ -144,9 +144,9 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                     rulerProbeEnabled = false
                                     rulerProbePoint = null
                                 } else if (rulerMarkers.size > 2) {
-                                    if (isCreatingFloorOpening) {
+                                    if (isCreatingPolygonRoom) {
                                         val room = doc.selectedElement as? Room
-                                        val newES = FloorOpening(rulerMarkers.toMutableList())
+                                        val newES = PolygonRoom(rulerMarkers.toMutableList())
                                         doc.saveState()
                                         doc.elements.add(newES)
                                         doc.selectedElement = newES
@@ -154,7 +154,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                         rulerClosed = false
                                         rulerProbeEnabled = true
                                         rulerProbePoint = null
-                                        isCreatingFloorOpening = false
+                                        isCreatingPolygonRoom = false
                                         doc.currentMode = AppMode.NORMAL
                                         doc.window!!.normalBtn.isSelected = true
                                         doc.canvas.cursor = Cursor.getDefaultCursor()
@@ -210,7 +210,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                         dragStart = e.point
                         val el = doc.selectedElement!!
                         initialElementBounds = Rectangle(el.x, el.y, el.width, el.height)
-                        if (el is FloorOpening) {
+                        if (el is PolygonRoom) {
                             initialVertices = el.vertices.map { Point(it.x, it.y) }
                         } else {
                             initialVertices = null
@@ -221,10 +221,10 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                         initialChildrenVertices.clear()
                         if (el is Wall || el is Room) {
                             doc.elements.forEach { other ->
-                                if (other is PlanWindow || other is Door || other is Stairs || other is FloorOpening) {
+                                if (other is PlanWindow || other is Door || other is Stairs || other is PolygonRoom) {
                                     if (el.getBounds().contains(other.getBounds())) {
                                         elementsToMoveWithWall.add(other to Point(other.x - el.x, other.y - el.y))
-                                        if (other is FloorOpening) {
+                                        if (other is PolygonRoom) {
                                             initialChildrenVertices.add(other to other.vertices.map { Point(it.x, it.y) })
                                         }
                                     }
@@ -318,7 +318,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                         // dx and dy are in model cm
 
                         if (activeHandle != ResizeHandle.NONE) {
-                                if (activeHandle is Int && element is FloorOpening) {
+                                if (activeHandle is Int && element is PolygonRoom) {
                                     val idx = activeHandle as Int
                                     val mx = doc.screenToModel(e.point.x, doc.offsetX).roundToInt()
                                     val my = doc.screenToModel(e.point.y, doc.offsetY).roundToInt()
@@ -327,31 +327,11 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                     val sx_sticky = getStickyCoord(mx, 0, true)
                                     val sy_sticky = getStickyCoord(my, 0, false)
                                     
-                                    val oldX = element.vertices[idx].x
-                                    val oldY = element.vertices[idx].y
-                                    
                                     if (element.vertices[idx].x != sx_sticky || element.vertices[idx].y != sy_sticky) {
                                         ensureStateSaved()
                                         element.vertices[idx].x = sx_sticky
                                         element.vertices[idx].y = sy_sticky
                                         element.updateBounds()
-                                    }
-                                    
-                                    if (doc.findContainingRoomForFloorOpening(element) == null) {
-                                        // Try move only X
-                                        element.vertices[idx].y = oldY
-                                        element.updateBounds()
-                                        if (doc.findContainingRoomForFloorOpening(element) == null) {
-                                            // Try move only Y
-                                            element.vertices[idx].x = oldX
-                                            element.vertices[idx].y = sy_sticky
-                                            element.updateBounds()
-                                            if (doc.findContainingRoomForFloorOpening(element) == null) {
-                                                // Snap back fully
-                                                element.vertices[idx].y = oldY
-                                                element.updateBounds()
-                                            }
-                                        }
                                     }
                                 } else if (activeHandle is ResizeHandle) {
                                 var newX = initial.x
@@ -424,11 +404,11 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                             element.height = newH
                                         }
                                     }
-                                } else if (element is Stairs || element is FloorOpening) {
+                                } else if (element is Stairs || element is PolygonRoom) {
                                     val room = if (element is Stairs) {
                                         doc.findContainingRoom(newX, newY, newW, newH)
                                     } else {
-                                        // For FloorOpening, standard rectangular resize handle dragging isn't implemented 
+                                        // For PolygonRoom, standard rectangular resize handle dragging isn't implemented 
                                         // (only vertex dragging via Int handle).
                                         // If it was, we'd need to check bounds here.
                                         null
@@ -473,7 +453,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                             if (!element.getBounds().contains(child.getBounds())) {
                                                 toRemove.add(child)
                                             }
-                                        } else if (element is Room && (child is Stairs || child is FloorOpening)) {
+                                        } else if (element is Room && (child is Stairs || child is PolygonRoom)) {
                                             if (!element.getBounds().contains(child.getBounds())) {
                                                 toRemove.add(child)
                                             }
@@ -615,22 +595,19 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                         es.updateBounds()
                                     }
                                 }
-                                if (element is FloorOpening && initialVertices != null) {
+                                if (element is PolygonRoom && initialVertices != null) {
                                     val dx_m = newX - initial.x
                                     val dy_m = newY - initial.y
                                     
-                                    val tempVertices = initialVertices!!.map { Point(it.x + dx_m, it.y + dy_m) }.toMutableList()
-                                    val tempES = FloorOpening(tempVertices)
-                                    if (doc.findContainingRoomForFloorOpening(tempES) != null) {
-                                        element.vertices.clear()
-                                        element.vertices.addAll(tempVertices)
-                                        element.x = newX
-                                        element.y = newY
-                                        element.updateBounds()
-                                    }
+                                    val newVertices = initialVertices!!.map { Point(it.x + dx_m, it.y + dy_m) }.toMutableList()
+                                    element.vertices.clear()
+                                    element.vertices.addAll(newVertices)
+                                    element.x = newX
+                                    element.y = newY
+                                    element.updateBounds()
                                 }
                                 
-                                // Constraints for EmptySpace and Stairs (must be inside a Room)
+                                // Constraints for Stairs (must be inside a Room)
                                     if (element is Stairs) {
                                         val room = doc.findContainingRoom(newX, newY, element.width, element.height)
                                         if (room != null) {
@@ -651,47 +628,6 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                                     if (newY < currentRoom.y) element.y = currentRoom.y
                                                     else if (newY + element.height > currentRoom.y + currentRoom.height) element.y = currentRoom.y + currentRoom.height - element.height
                                                 }
-                                                val modelDragStartX = doc.screenToModel(e.x, 0.0) - (element.x - initial.x)
-                                                val modelDragStartY = doc.screenToModel(e.y, 0.0) - (element.y - initial.y)
-                                                dragStart = Point(doc.modelToScreen(modelDragStartX, 0.0), doc.modelToScreen(modelDragStartY, 0.0))
-                                            }
-                                        }
-                                    } else if (element is FloorOpening && initialVertices != null) {
-                                        val dx_m = newX - initial.x
-                                        val dy_m = newY - initial.y
-                                        
-                                        val tempVertices = initialVertices!!.map { Point(it.x + dx_m, it.y + dy_m) }.toMutableList()
-                                        val tempES = FloorOpening(tempVertices)
-                                        if (doc.findContainingRoomForFloorOpening(tempES) != null) {
-                                            element.vertices.clear()
-                                            element.vertices.addAll(tempVertices)
-                                            element.x = newX
-                                            element.y = newY
-                                            element.updateBounds()
-                                        } else {
-                                            // Handle sticking for FloorOpening movement
-                                            val currentRoom = doc.findContainingRoomForFloorOpening(element)
-                                            if (currentRoom != null) {
-                                                // Try X move
-                                                val tempVerticesX = initialVertices!!.map { Point(it.x + dx_m, it.y + (element.y - initial.y)) }.toMutableList()
-                                                if (doc.findContainingRoomForFloorOpening(FloorOpening(tempVerticesX)) != null) {
-                                                    element.vertices.clear()
-                                                    element.vertices.addAll(tempVerticesX)
-                                                    element.x = newX
-                                                }
-                                                // Try Y move
-                                                val tempVerticesY = initialVertices!!.map { Point(it.x + (element.x - initial.x), it.y + dy_m) }.toMutableList()
-                                                if (doc.findContainingRoomForFloorOpening(FloorOpening(tempVerticesY)) != null) {
-                                                    element.vertices.clear()
-                                                    element.vertices.addAll(tempVerticesY)
-                                                    element.y = newY
-                                                }
-                                                element.updateBounds()
-                                                
-                                                if (element.x != oldX || element.y != oldY) {
-                                                    ensureStateSaved()
-                                                }
-
                                                 val modelDragStartX = doc.screenToModel(e.x, 0.0) - (element.x - initial.x)
                                                 val modelDragStartY = doc.screenToModel(e.y, 0.0) - (element.y - initial.y)
                                                 dragStart = Point(doc.modelToScreen(modelDragStartX, 0.0), doc.modelToScreen(modelDragStartY, 0.0))
@@ -783,11 +719,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 doc.app.popAddWallMenu.isVisible = true
                 doc.app.popAddRoomMenu.isVisible = true
                 
-                // Only show "Add Floor Opening" if clicking over a room
-                val roomAtPoint = doc.elements.reversed().filterIsInstance<Room>().find { 
-                    it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
-                }
-                doc.app.popAddFloorOpeningMenu.isVisible = roomAtPoint != null
+                // Show "Add Room Polygon" in the same menu as "Add Room"
+                doc.app.popAddFloorOpeningMenu.isVisible = true
             
                 doc.app.popSepGeneral.isVisible = false
                 doc.app.popDuplicateMenu.isVisible = false
@@ -797,11 +730,12 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 doc.app.popAddDoorMenu.isVisible = false
                 doc.app.popSepRoom.isVisible = false
                 doc.app.popAddStairsMenu.isVisible = false
+                doc.app.popConvertToPolygonMenu.isVisible = false
             } else {
                 doc.app.popAddWallMenu.isVisible = false
                 doc.app.popAddRoomMenu.isVisible = false
-                // "Add Floor opening" is visible only if selected element is a Room
-                doc.app.popAddFloorOpeningMenu.isVisible = isRoom
+                // "Add Room Polygon" is not shown when element is selected
+                doc.app.popAddFloorOpeningMenu.isVisible = false
             
                 doc.app.popSepGeneral.isVisible = true
                 doc.app.popDuplicateMenu.isVisible = true
@@ -813,6 +747,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             
                 doc.app.popSepRoom.isVisible = isRoom
                 doc.app.popAddStairsMenu.isVisible = isRoom
+                doc.app.popConvertToPolygonMenu.isVisible = isRoom
             }
         
             doc.app.popupMenu.show(e.component, e.x, e.y)
@@ -848,6 +783,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         private fun getRoomGroups(): List<List<Room>> {
             val rooms = doc.elements.filterIsInstance<Room>()
             if (rooms.isEmpty()) return emptyList()
+            
+            val polygonRooms = doc.elements.filterIsInstance<PolygonRoom>()
 
             val adjacency = mutableMapOf<Room, MutableSet<Room>>()
             for (i in rooms.indices) {
@@ -855,6 +792,21 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     val r1 = rooms[i]
                     val r2 = rooms[j]
                     if (areAdjacent(r1, r2)) {
+                        adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
+                        adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
+                    }
+                }
+            }
+            
+            // Also consider polygon rooms as bridges between rectangular rooms
+            // If a polygon room is docked to multiple rectangular rooms, those rooms should be in the same component
+            for (pr in polygonRooms) {
+                val dockedRooms = rooms.filter { isPolygonRoomDockedToRoom(pr, it) }
+                // Connect all rooms that share this polygon room
+                for (i in dockedRooms.indices) {
+                    for (j in i + 1 until dockedRooms.size) {
+                        val r1 = dockedRooms[i]
+                        val r2 = dockedRooms[j]
                         adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
                         adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
                     }
@@ -900,6 +852,47 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 if (rect1.y == rect2.y + rect2.height || rect2.y == rect1.y + rect1.height) return true
             }
             
+            return false
+        }
+
+        private fun isPolygonRoomDockedToRoom(pr: PolygonRoom, room: Room): Boolean {
+            // Check if polygon room shares a horizontal or vertical edge with the room
+            val roomBounds = room.getBounds()
+            val vertices = pr.vertices
+            
+            for (i in vertices.indices) {
+                val v1 = vertices[i]
+                val v2 = vertices[(i + 1) % vertices.size]
+                
+                // Check if this edge is horizontal or vertical
+                if (v1.x == v2.x) {
+                    // Vertical edge
+                    val edgeX = v1.x
+                    val edgeMinY = minOf(v1.y, v2.y)
+                    val edgeMaxY = maxOf(v1.y, v2.y)
+                    
+                    // Check if this edge aligns with room's left or right edge
+                    if (edgeX == roomBounds.x || edgeX == roomBounds.x + roomBounds.width) {
+                        // Check if there's vertical overlap
+                        if (edgeMinY < roomBounds.y + roomBounds.height && edgeMaxY > roomBounds.y) {
+                            return true
+                        }
+                    }
+                } else if (v1.y == v2.y) {
+                    // Horizontal edge
+                    val edgeY = v1.y
+                    val edgeMinX = minOf(v1.x, v2.x)
+                    val edgeMaxX = maxOf(v1.x, v2.x)
+                    
+                    // Check if this edge aligns with room's top or bottom edge
+                    if (edgeY == roomBounds.y || edgeY == roomBounds.y + roomBounds.height) {
+                        // Check if there's horizontal overlap
+                        if (edgeMinX < roomBounds.x + roomBounds.width && edgeMaxX > roomBounds.x) {
+                            return true
+                        }
+                    }
+                }
+            }
             return false
         }
 
@@ -972,7 +965,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             for (r in group) {
                 totalArea += r.getArea()
                 val rBounds = r.getBounds()
-                val nested = doc.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
+                val nested = doc.elements.filter { (it is Stairs || it is PolygonRoom) && rBounds.contains(it.getBounds()) }
                 for (el in nested) {
                     totalArea -= el.getArea()
                 }
@@ -1063,9 +1056,9 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 }
             }
 
-            // Draw order: Rooms, FloorOpening, Walls, Stairs, Windows/Doors
+            // Draw order: Rooms, PolygonRoom, Walls, Stairs, Windows/Doors
             val rooms = doc.elements.filterIsInstance<Room>()
-            val floorOpenings = doc.elements.filterIsInstance<FloorOpening>()
+            val floorOpenings = doc.elements.filterIsInstance<PolygonRoom>()
             val walls = doc.elements.filterIsInstance<Wall>()
             val stairs = doc.elements.filterIsInstance<Stairs>()
             val attachments = doc.elements.filter { it is PlanWindow || it is Door }
@@ -1191,6 +1184,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
 
             // Draw room areas at the end
             val groups = getRoomGroups()
+            val allPolygonRooms = doc.elements.filterIsInstance<PolygonRoom>()
             for (group in groups) {
                 val largestRoom = group.maxByOrNull { it.getArea() } ?: continue
                 
@@ -1201,11 +1195,19 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     
                     var rCorrected = r.getArea()
                     val rBounds = r.getBounds()
-                    val nested = doc.elements.filter { (it is Stairs || it is FloorOpening) && rBounds.contains(it.getBounds()) }
+                    val nested = doc.elements.filter { (it is Stairs || it is PolygonRoom) && rBounds.contains(it.getBounds()) }
                     for (el in nested) {
                         rCorrected -= el.getArea()
                     }
                     groupCorrectedArea += rCorrected
+                }
+                
+                // Add area of docked polygon rooms to the component area
+                for (pr in allPolygonRooms) {
+                    if (group.any { room -> isPolygonRoomDockedToRoom(pr, room) }) {
+                        groupNominalArea += pr.getArea()
+                        groupCorrectedArea += pr.getArea()
+                    }
                 }
 
                 val sx = doc.modelToScreen(largestRoom.x.toDouble(), offX, sc)
@@ -1435,10 +1437,10 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 ElementType.ROOM -> g2.color = Color.LIGHT_GRAY
                 ElementType.WINDOW -> g2.color = Color.CYAN
                 ElementType.DOOR -> g2.color = Color.ORANGE
-                ElementType.FLOOR_OPENING -> {
-                    g2.color = Color(230, 230, 230) // Light gray
+                ElementType.POLYGON_ROOM -> {
+                    g2.color = Color(230, 230, 230) // Light gray for polygon room
                     val poly = Polygon()
-                    (el as FloorOpening).vertices.forEach {
+                    (el as PolygonRoom).vertices.forEach {
                         poly.addPoint(doc.modelToScreen(it.x.toDouble(), doc.offsetX), doc.modelToScreen(it.y.toDouble(), doc.offsetY))
                     }
                     g2.fillPolygon(poly)
@@ -1486,15 +1488,15 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             val selectionColor = if (doc.app.activeDocument == doc) Color.RED else Color.GRAY
             g2.color = selectionColor
             g2.setStroke(BasicStroke(2f))
-            if (doc.selectedElement is FloorOpening) {
+            if (doc.selectedElement is PolygonRoom) {
                 val poly = Polygon()
-                (doc.selectedElement as FloorOpening).vertices.forEach {
+                (doc.selectedElement as PolygonRoom).vertices.forEach {
                     poly.addPoint(doc.modelToScreen(it.x.toDouble(), doc.offsetX), doc.modelToScreen(it.y.toDouble(), doc.offsetY))
                 }
                 g2.drawPolygon(poly)
                 
                 val r = HANDLE_SIZE / 2
-                (doc.selectedElement as FloorOpening).vertices.forEachIndexed { index, it ->
+                (doc.selectedElement as PolygonRoom).vertices.forEachIndexed { index, it ->
                     val vsx = doc.modelToScreen(it.x.toDouble(), doc.offsetX)
                     val vsy = doc.modelToScreen(it.y.toDouble(), doc.offsetY)
                     

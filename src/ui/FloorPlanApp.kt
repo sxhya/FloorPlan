@@ -9,7 +9,7 @@ import model.Room
 import model.Window as PlanWindow
 import model.Door
 import model.Stairs
-import model.FloorOpening
+import model.PolygonRoom
 import javafx.application.Platform
 import ui.components.SidePanel
 import ui.components.StatisticsPanel
@@ -67,6 +67,7 @@ class FloorPlanApp {
     internal lateinit var popSepRoom: JSeparator
     internal lateinit var popAddStairsMenu: JMenuItem
     internal lateinit var popAddFloorOpeningMenu: JMenuItem
+    internal lateinit var popConvertToPolygonMenu: JMenuItem
 
     init {
         Platform.setImplicitExit(false)
@@ -227,7 +228,7 @@ class FloorPlanApp {
                     is PlanWindow -> PlanWindow(el.x + shift, el.y + shift, el.width, el.height, el.height3D, el.sillElevation)
                     is Door -> Door(el.x + shift, el.y + shift, el.width, el.height, el.verticalHeight)
                     is Stairs -> Stairs(el.x + shift, el.y + shift, el.width, el.height)
-                    is FloorOpening -> FloorOpening(el.vertices.map { Point(it.x + shift, it.y + shift) }.toMutableList())
+                    is PolygonRoom -> PolygonRoom(el.vertices.map { Point(it.x + shift, it.y + shift) }.toMutableList(), el.floorThickness)
                     else -> null
                 }
                 newEl?.let {
@@ -575,6 +576,7 @@ class FloorPlanApp {
         var runningZ = 0.0
         for ((idx, floor) in floors.withIndex()) {
             val rooms = floor.doc.elements.filterIsInstance<Room>()
+            val polygonRooms = floor.doc.elements.filterIsInstance<PolygonRoom>()
             if (rooms.isNotEmpty()) {
                 val adjacency = mutableMapOf<Room, MutableSet<Room>>()
                 for (i in rooms.indices) {
@@ -605,7 +607,16 @@ class FloorPlanApp {
                                 }
                             }
                         }
-                        val groupArea = group.sumOf { it.width.toDouble() * it.height.toDouble() }
+                        // Calculate area of rooms in the component
+                        var groupArea = group.sumOf { it.width.toDouble() * it.height.toDouble() }
+                        
+                        // Add area of all polygon rooms docked to any room in this component
+                        for (pr in polygonRooms) {
+                            if (group.any { room -> isPolygonRoomDockedToRoom(pr, room) }) {
+                                groupArea += pr.getArea()
+                            }
+                        }
+                        
                         if (groupArea > maxGroupArea) {
                             maxGroupArea = groupArea
                             largestGroup = group
@@ -753,23 +764,69 @@ class FloorPlanApp {
                             ))
                         }
                     }
+                    is PolygonRoom -> {
+                        // Create a polygonal floor slab for the polygon room
+                        val thickness = el.floorThickness.toDouble()
+                        val vertices = el.vertices
+                        
+                        if (vertices.size >= 3) {
+                            // Create top and bottom faces using triangle fan from centroid
+                            val centroidX = vertices.sumOf { it.x.toDouble() } / vertices.size
+                            val centroidY = vertices.sumOf { it.y.toDouble() } / vertices.size
+                            
+                            for (i in vertices.indices) {
+                                val v1 = vertices[i]
+                                val v2 = vertices[(i + 1) % vertices.size]
+                                
+                                // Top face triangle
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(centroidX, centroidY, currentZ),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), currentZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), currentZ),
+                                    Color.LIGHT_GRAY
+                                ))
+                                
+                                // Bottom face triangle (reversed winding)
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(centroidX, centroidY, currentZ - thickness),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), currentZ - thickness),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), currentZ - thickness),
+                                    Color.LIGHT_GRAY
+                                ))
+                                
+                                // Side face (quad as two triangles)
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), currentZ),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), currentZ - thickness),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), currentZ - thickness),
+                                    Color.LIGHT_GRAY
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), currentZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), currentZ - thickness),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), currentZ),
+                                    Color.LIGHT_GRAY
+                                ))
+                            }
+                        }
+                    }
                     is Wall -> {
                         val wallBounds = el.getBounds()
                         val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
                             .filter { wallBounds.contains(it.getBounds()) }
                         
-                        // Check if there's a floor above and if any room on that floor contains this wall
+                        // Check if there's a floor above and if any room on that floor fully contains this wall
                         // If so, reduce wall height by that room's floor thickness
                         val currentFloorIndex = floors.indexOf(floor)
                         var wallTopReduction = 0.0
                         if (currentFloorIndex < floors.size - 1) {
                             val floorAbove = floors[currentFloorIndex + 1]
                             val roomsAbove = floorAbove.doc.elements.filterIsInstance<Room>()
-                            // Check if any room on the floor above contains/overlaps the wall
+                            // Check if any room on the floor above fully contains the wall
                             for (roomAbove in roomsAbove) {
                                 val roomBounds = roomAbove.getBounds()
-                                if (roomBounds.intersects(wallBounds)) {
-                                    // Wall is under this room, reduce height by floor thickness
+                                if (roomBounds.contains(wallBounds)) {
+                                    // Wall is fully under this room, reduce height by floor thickness
                                     wallTopReduction = roomAbove.floorThickness.toDouble()
                                     break
                                 }
@@ -931,6 +988,47 @@ class FloorPlanApp {
         }
         return false
     }
+    
+    private fun isPolygonRoomDockedToRoom(pr: PolygonRoom, room: Room): Boolean {
+        // Check if polygon room shares a horizontal or vertical edge with the room
+        val roomBounds = room.getBounds()
+        val vertices = pr.vertices
+        
+        for (i in vertices.indices) {
+            val v1 = vertices[i]
+            val v2 = vertices[(i + 1) % vertices.size]
+            
+            // Check if this edge is horizontal or vertical
+            if (v1.x == v2.x) {
+                // Vertical edge
+                val edgeX = v1.x
+                val edgeMinY = minOf(v1.y, v2.y)
+                val edgeMaxY = maxOf(v1.y, v2.y)
+                
+                // Check if this edge aligns with room's left or right edge
+                if (edgeX == roomBounds.x || edgeX == roomBounds.x + roomBounds.width) {
+                    // Check if there's vertical overlap
+                    if (edgeMinY < roomBounds.y + roomBounds.height && edgeMaxY > roomBounds.y) {
+                        return true
+                    }
+                }
+            } else if (v1.y == v2.y) {
+                // Horizontal edge
+                val edgeY = v1.y
+                val edgeMinX = minOf(v1.x, v2.x)
+                val edgeMaxX = maxOf(v1.x, v2.x)
+                
+                // Check if this edge aligns with room's top or bottom edge
+                if (edgeY == roomBounds.y || edgeY == roomBounds.y + roomBounds.height) {
+                    // Check if there's horizontal overlap
+                    if (edgeMinX < roomBounds.x + roomBounds.width && edgeMaxX > roomBounds.x) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
 
     private fun setupPopupMenu() {
         popAddWallMenu = JMenuItem("Add Wall")
@@ -941,8 +1039,8 @@ class FloorPlanApp {
         popAddRoomMenu.addActionListener { sidePanel.addElement(ElementType.ROOM) }
         popupMenu.add(popAddRoomMenu)
 
-        popAddFloorOpeningMenu = JMenuItem("Add Floor Opening")
-        popAddFloorOpeningMenu.addActionListener { sidePanel.addElement(ElementType.FLOOR_OPENING) }
+        popAddFloorOpeningMenu = JMenuItem("Add Room Polygon")
+        popAddFloorOpeningMenu.addActionListener { sidePanel.addElement(ElementType.POLYGON_ROOM) }
         popupMenu.add(popAddFloorOpeningMenu)
 
         popSepGeneral = JSeparator()
@@ -1001,6 +1099,31 @@ class FloorPlanApp {
         popAddStairsMenu = JMenuItem("Add Stairs")
         popAddStairsMenu.addActionListener { sidePanel.addElement(ElementType.STAIRS) }
         popupMenu.add(popAddStairsMenu)
+        
+        popConvertToPolygonMenu = JMenuItem("Convert to Polygon Room")
+        popConvertToPolygonMenu.addActionListener {
+            activeDocument?.let { doc ->
+                val room = doc.selectedElement as? Room ?: return@addActionListener
+                doc.saveState()
+                // Convert room rectangle to polygon vertices
+                val vertices = mutableListOf(
+                    Point(room.x, room.y),
+                    Point(room.x + room.width, room.y),
+                    Point(room.x + room.width, room.y + room.height),
+                    Point(room.x, room.y + room.height)
+                )
+                val polygonRoom = PolygonRoom(vertices, room.floorThickness)
+                // Replace room with polygon room
+                val index = doc.elements.indexOf(room)
+                doc.elements.remove(room)
+                doc.elements.add(index, polygonRoom)
+                doc.selectedElement = polygonRoom
+                sidePanel.updateFields(polygonRoom)
+                statsPanel.update()
+                doc.canvas.repaint()
+            }
+        }
+        popupMenu.add(popConvertToPolygonMenu)
     }
 
     internal fun refreshUI() {
@@ -1130,7 +1253,11 @@ class FloorPlanApp {
                 for (el in doc.elements) {
                     val elNode = xmlDoc.createElement("Element")
                     elNode.setAttribute("type", el.type.name)
-                    if (el !is FloorOpening) {
+                    if (el is PolygonRoom) {
+                        val verticesStr = el.vertices.joinToString(";") { "${it.x},${it.y}" }
+                        elNode.setAttribute("vertices", verticesStr)
+                        elNode.setAttribute("floorThickness", el.floorThickness.toString())
+                    } else {
                         elNode.setAttribute("x", el.x.toString())
                         elNode.setAttribute("y", el.y.toString())
                         elNode.setAttribute("width", el.width.toString())
@@ -1141,9 +1268,6 @@ class FloorPlanApp {
                         }
                         if (el is Door) elNode.setAttribute("height3D", el.verticalHeight.toString())
                         if (el is Room) elNode.setAttribute("floorThickness", el.floorThickness.toString())
-                    } else {
-                        val verticesStr = el.vertices.joinToString(";") { "${it.x},${it.y}" }
-                        elNode.setAttribute("vertices", verticesStr)
                     }
                     rootElement.appendChild(elNode)
                 }
@@ -1228,7 +1352,7 @@ class FloorPlanApp {
                         val h = eElement.getAttribute("height").toInt()
                         Stairs(x, y, w, h)
                     }
-                    ElementType.FLOOR_OPENING -> {
+                    ElementType.POLYGON_ROOM -> {
                         val vertices = mutableListOf<Point>()
                         val verticesStr = eElement.getAttribute("vertices")
                         if (verticesStr.isNotEmpty()) {
@@ -1239,9 +1363,10 @@ class FloorPlanApp {
                                 }
                             }
                         }
-                        val es = FloorOpening(vertices)
-                        es.updateBounds()
-                        es
+                        val ft = if (eElement.hasAttribute("floorThickness")) eElement.getAttribute("floorThickness").toInt() else 15
+                        val pr = PolygonRoom(vertices, ft)
+                        pr.updateBounds()
+                        pr
                     }
                 }
                 newElements.add(el)
