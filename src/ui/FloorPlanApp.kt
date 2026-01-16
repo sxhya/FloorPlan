@@ -10,6 +10,7 @@ import model.Window as PlanWindow
 import model.Door
 import model.Stairs
 import model.FloorOpening
+import javafx.application.Platform
 import ui.components.SidePanel
 import ui.components.StatisticsPanel
 import java.awt.*
@@ -68,6 +69,7 @@ class FloorPlanApp {
     internal lateinit var popAddFloorOpeningMenu: JMenuItem
 
     init {
+        Platform.setImplicitExit(false)
         loadSettings()
         setupPopupMenu()
         sidePanelWindow = SidePanelWindow(this)
@@ -194,6 +196,7 @@ class FloorPlanApp {
 
         threeDDocuments.remove(doc)
         if (activeWindow == doc.window) activeWindow = null
+        doc.panel.dispose()
         doc.window?.dispose()
         if (saveImmediately) saveSettings()
     }
@@ -562,14 +565,119 @@ class FloorPlanApp {
 
     private fun generate3DModel(floors: List<FloorInfo>) {
         val model3d = model.Model3D()
-        var currentZ = 0.0
+        
+        // Find the largest conjoined room space across all floors
+        var largestGroup: List<Room>? = null
+        var maxGroupArea = -1.0
+        var groupFloorIndex = 0
+        var groupZOffset = 0.0
 
+        var runningZ = 0.0
+        for ((idx, floor) in floors.withIndex()) {
+            val rooms = floor.doc.elements.filterIsInstance<Room>()
+            if (rooms.isNotEmpty()) {
+                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
+                for (i in rooms.indices) {
+                    for (j in i + 1 until rooms.size) {
+                        val r1 = rooms[i]
+                        val r2 = rooms[j]
+                        if (areAdjacentRooms(r1, r2)) {
+                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
+                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
+                        }
+                    }
+                }
+
+                val visited = mutableSetOf<Room>()
+                for (room in rooms) {
+                    if (room !in visited) {
+                        val group = mutableListOf<Room>()
+                        val queue: java.util.Queue<Room> = java.util.LinkedList()
+                        queue.add(room)
+                        visited.add(room)
+                        while (queue.isNotEmpty()) {
+                            val r = queue.poll()
+                            group.add(r)
+                            adjacency[r]?.forEach { neighbor ->
+                                if (neighbor !in visited) {
+                                    visited.add(neighbor)
+                                    queue.add(neighbor)
+                                }
+                            }
+                        }
+                        val groupArea = group.sumOf { it.width.toDouble() * it.height.toDouble() }
+                        if (groupArea > maxGroupArea) {
+                            maxGroupArea = groupArea
+                            largestGroup = group
+                            groupFloorIndex = idx
+                            groupZOffset = runningZ
+                        }
+                    }
+                }
+            }
+            runningZ += floor.height.toDouble()
+        }
+
+        var currentZ = 0.0
         val doc3d = ThreeDDocument(this)
         for (floor in floors) {
             val floorPath = floor.doc.currentFile?.absolutePath ?: ""
             doc3d.floors.add(ThreeDDocument.FloorData(floorPath, floor.height))
 
             val floorHeight = floor.height.toDouble()
+            val roomsOnFloor = floor.doc.elements.filterIsInstance<Room>()
+            
+            // Compute light positions based on dockedness components
+            if (roomsOnFloor.isNotEmpty()) {
+                // Z coordinate: center height of this floor (including offset from floors below)
+                val centerZ = currentZ + floorHeight / 2.0
+                
+                // Build adjacency map for rooms on this floor
+                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
+                for (i in roomsOnFloor.indices) {
+                    for (j in i + 1 until roomsOnFloor.size) {
+                        val r1 = roomsOnFloor[i]
+                        val r2 = roomsOnFloor[j]
+                        if (areAdjacentRooms(r1, r2)) {
+                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
+                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
+                        }
+                    }
+                }
+                
+                // Find all dockedness components (connected room groups)
+                val visited = mutableSetOf<Room>()
+                for (room in roomsOnFloor) {
+                    if (room !in visited) {
+                        val component = mutableListOf<Room>()
+                        val queue: java.util.Queue<Room> = java.util.LinkedList()
+                        queue.add(room)
+                        visited.add(room)
+                        while (queue.isNotEmpty()) {
+                            val r = queue.poll()
+                            component.add(r)
+                            adjacency[r]?.forEach { neighbor ->
+                                if (neighbor !in visited) {
+                                    visited.add(neighbor)
+                                    queue.add(neighbor)
+                                }
+                            }
+                        }
+                        
+                        // Find the largest room in this dockedness component
+                        val largestRoom = component.maxByOrNull { it.width.toDouble() * it.height.toDouble() }
+                        if (largestRoom != null) {
+                            // X, Y coordinates: center of the largest room
+                            val centerX = largestRoom.x.toDouble() + largestRoom.width.toDouble() / 2.0
+                            val centerY = largestRoom.y.toDouble() + largestRoom.height.toDouble() / 2.0
+                            
+                            // Add ONE light source per dockedness component
+                            model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
+                        }
+                    }
+                }
+            }
+
             for (el in floor.doc.elements) {
                 when (el) {
                     is Room -> {
@@ -580,11 +688,28 @@ class FloorPlanApp {
                         val y2 = (el.y + el.height).toDouble()
                         val thickness = el.floorThickness.toDouble()
                         
-                        // Add a point light at the center of the room (200cm above floor)
-                        val lightX = (x1 + x2) / 2.0
-                        val lightY = (y1 + y2) / 2.0
-                        val lightZ = currentZ + 200.0 // 200cm above floor level
-                        model3d.lightPositions.add(Vector3D(lightX, lightY, lightZ))
+                        // Check which edges are shared with other rooms to avoid Z-fighting on side faces
+                        val otherRooms = roomsOnFloor.filter { it !== el }
+                        val hasAdjacentTop = otherRooms.any { other ->
+                            // Another room shares the top edge (y1) of this room
+                            other.y + other.height == el.y && 
+                            other.x < el.x + el.width && other.x + other.width > el.x
+                        }
+                        val hasAdjacentBottom = otherRooms.any { other ->
+                            // Another room shares the bottom edge (y2) of this room
+                            other.y == el.y + el.height && 
+                            other.x < el.x + el.width && other.x + other.width > el.x
+                        }
+                        val hasAdjacentLeft = otherRooms.any { other ->
+                            // Another room shares the left edge (x1) of this room
+                            other.x + other.width == el.x && 
+                            other.y < el.y + el.height && other.y + other.height > el.y
+                        }
+                        val hasAdjacentRight = otherRooms.any { other ->
+                            // Another room shares the right edge (x2) of this room
+                            other.x == el.x + el.width && 
+                            other.y < el.y + el.height && other.y + other.height > el.y
+                        }
                         
                         // Top face (floor surface at currentZ)
                         model3d.rects.add(Rect3D(
@@ -598,32 +723,59 @@ class FloorPlanApp {
                             Vector3D(x2, y2, currentZ - thickness), Vector3D(x1, y2, currentZ - thickness),
                             Color.LIGHT_GRAY
                         ))
-                        // Side faces
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x1, y1, currentZ - thickness), Vector3D(x2, y1, currentZ - thickness),
-                            Vector3D(x2, y1, currentZ), Vector3D(x1, y1, currentZ),
-                            Color.LIGHT_GRAY
-                        ))
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x2, y1, currentZ - thickness), Vector3D(x2, y2, currentZ - thickness),
-                            Vector3D(x2, y2, currentZ), Vector3D(x2, y1, currentZ),
-                            Color.LIGHT_GRAY
-                        ))
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x2, y2, currentZ - thickness), Vector3D(x1, y2, currentZ - thickness),
-                            Vector3D(x1, y2, currentZ), Vector3D(x2, y2, currentZ),
-                            Color.LIGHT_GRAY
-                        ))
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x1, y2, currentZ - thickness), Vector3D(x1, y1, currentZ - thickness),
-                            Vector3D(x1, y1, currentZ), Vector3D(x1, y2, currentZ),
-                            Color.LIGHT_GRAY
-                        ))
+                        // Side faces - only add if not adjacent to another room on that edge
+                        if (!hasAdjacentTop) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, y1, currentZ - thickness), Vector3D(x2, y1, currentZ - thickness),
+                                Vector3D(x2, y1, currentZ), Vector3D(x1, y1, currentZ),
+                                Color.LIGHT_GRAY
+                            ))
+                        }
+                        if (!hasAdjacentRight) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x2, y1, currentZ - thickness), Vector3D(x2, y2, currentZ - thickness),
+                                Vector3D(x2, y2, currentZ), Vector3D(x2, y1, currentZ),
+                                Color.LIGHT_GRAY
+                            ))
+                        }
+                        if (!hasAdjacentBottom) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x2, y2, currentZ - thickness), Vector3D(x1, y2, currentZ - thickness),
+                                Vector3D(x1, y2, currentZ), Vector3D(x2, y2, currentZ),
+                                Color.LIGHT_GRAY
+                            ))
+                        }
+                        if (!hasAdjacentLeft) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, y2, currentZ - thickness), Vector3D(x1, y1, currentZ - thickness),
+                                Vector3D(x1, y1, currentZ), Vector3D(x1, y2, currentZ),
+                                Color.LIGHT_GRAY
+                            ))
+                        }
                     }
                     is Wall -> {
                         val wallBounds = el.getBounds()
                         val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
                             .filter { wallBounds.contains(it.getBounds()) }
+                        
+                        // Check if there's a floor above and if any room on that floor contains this wall
+                        // If so, reduce wall height by that room's floor thickness
+                        val currentFloorIndex = floors.indexOf(floor)
+                        var wallTopReduction = 0.0
+                        if (currentFloorIndex < floors.size - 1) {
+                            val floorAbove = floors[currentFloorIndex + 1]
+                            val roomsAbove = floorAbove.doc.elements.filterIsInstance<Room>()
+                            // Check if any room on the floor above contains/overlaps the wall
+                            for (roomAbove in roomsAbove) {
+                                val roomBounds = roomAbove.getBounds()
+                                if (roomBounds.intersects(wallBounds)) {
+                                    // Wall is under this room, reduce height by floor thickness
+                                    wallTopReduction = roomAbove.floorThickness.toDouble()
+                                    break
+                                }
+                            }
+                        }
+                        val effectiveWallTop = currentZ + floorHeight - wallTopReduction
                         
                         fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
                             if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
@@ -642,7 +794,7 @@ class FloorPlanApp {
                         }
 
                         if (openings.isEmpty()) {
-                            addBox(el.x.toDouble(), el.y.toDouble(), (el.x + el.width).toDouble(), (el.y + el.height).toDouble(), currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                            addBox(el.x.toDouble(), el.y.toDouble(), (el.x + el.width).toDouble(), (el.y + el.height).toDouble(), currentZ, effectiveWallTop, Color.DARK_GRAY)
                         } else {
                             val isVertical = el.width < el.height
                             if (isVertical) {
@@ -658,16 +810,16 @@ class FloorPlanApp {
                                     val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
                                     
                                     // Part before opening
-                                    addBox(x1, lastY, x2, opY1, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                    addBox(x1, lastY, x2, opY1, currentZ, effectiveWallTop, Color.DARK_GRAY)
                                     // Part above opening
-                                    addBox(x1, opY1, x2, opY2, opZ2, currentZ + floorHeight, Color.DARK_GRAY)
+                                    addBox(x1, opY1, x2, opY2, opZ2, effectiveWallTop, Color.DARK_GRAY)
                                     // Part below opening
                                     addBox(x1, opY1, x2, opY2, currentZ, opZ1, Color.DARK_GRAY)
                                     
                                     lastY = opY2
                                 }
                                 // Part after last opening
-                                addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, effectiveWallTop, Color.DARK_GRAY)
                             } else {
                                 // Wall is along X axis
                                 val y1 = el.y.toDouble()
@@ -681,21 +833,20 @@ class FloorPlanApp {
                                     val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
 
                                     // Part before opening
-                                    addBox(lastX, y1, opX1, y2, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                    addBox(lastX, y1, opX1, y2, currentZ, effectiveWallTop, Color.DARK_GRAY)
                                     // Part above opening
-                                    addBox(opX1, y1, opX2, y2, opZ2, currentZ + floorHeight, Color.DARK_GRAY)
+                                    addBox(opX1, y1, opX2, y2, opZ2, effectiveWallTop, Color.DARK_GRAY)
                                     // Part below opening
                                     addBox(opX1, y1, opX2, y2, currentZ, opZ1, Color.DARK_GRAY)
 
                                     lastX = opX2
                                 }
                                 // Part after last opening
-                                addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, currentZ + floorHeight, Color.DARK_GRAY)
+                                addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, effectiveWallTop, Color.DARK_GRAY)
                             }
                         }
                     }
                     is PlanWindow -> {
-                        // Windows are openings in walls. For simplicity, we draw them as separate colored boxes for now.
                         val x1 = el.x.toDouble()
                         val y1 = el.y.toDouble()
                         val x2 = (el.x + el.width).toDouble()
@@ -703,35 +854,59 @@ class FloorPlanApp {
                         val h3d = el.height3D.toDouble()
                         val afh = el.sillElevation.toDouble()
                         
-                        // Draw window as a box
                         val wz1 = currentZ + afh
                         val wz2 = wz1 + h3d
+
+                        val rooms = floor.doc.elements.filterIsInstance<Room>()
+                        val isVertical = el.width < el.height
                         
-                        // 6 faces
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Color.CYAN, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz2), Vector3D(x2, y1, wz2), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), Color.CYAN, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), Color.CYAN, true))
-                        model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), Color.CYAN, true))
-                        model3d.rects.add(Rect3D(Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x2, y2, wz2), Color.CYAN, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x1, y1, wz1), Vector3D(x1, y1, wz2), Vector3D(x1, y2, wz2), Color.CYAN, true))
+                        // Semi-transparent blue (lower alpha = more transparent)
+                        val windowColor = Color(0, 191, 255, 64)
+
+                        if (isVertical) {
+                            // Wall is along Y axis, so outer side is either X-epsilon or X+width+epsilon
+                            val centerX = (x1 + x2) / 2.0
+                            val centerY = (y1 + y2) / 2.0
+                            
+                            val hasRoomLeft = rooms.any { it.getBounds().contains(Point((centerX - 5).toInt(), centerY.toInt())) }
+                            val hasRoomRight = rooms.any { it.getBounds().contains(Point((centerX + 5).toInt(), centerY.toInt())) }
+                            
+                            if (!hasRoomLeft) {
+                                // Left side is outer
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                            } else if (!hasRoomRight) {
+                                // Right side is outer
+                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
+                            } else {
+                                // Both sides have rooms, or neither? If both, just pick one or draw both?
+                                // "Outer is where is no room docked."
+                                // If it's an internal window, maybe it shouldn't be drawn or drawn on both sides.
+                                // Let's draw on both if both are "outer" (shouldn't happen for a wall between rooms if we use 5 pixels)
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
+                            }
+                        } else {
+                            // Wall is along X axis, so outer side is either Y-epsilon or Y+height+epsilon
+                            val centerX = (x1 + x2) / 2.0
+                            val centerY = (y1 + y2) / 2.0
+                            
+                            val hasRoomTop = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY - 5).toInt())) }
+                            val hasRoomBottom = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY + 5).toInt())) }
+                            
+                            if (!hasRoomTop) {
+                                // Top side is outer
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                            } else if (!hasRoomBottom) {
+                                // Bottom side is outer
+                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
+                            } else {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
+                            }
+                        }
                     }
                     is Door -> {
-                        val x1 = el.x.toDouble()
-                        val y1 = el.y.toDouble()
-                        val x2 = (el.x + el.width).toDouble()
-                        val y2 = (el.y + el.height).toDouble()
-                        val h3d = el.verticalHeight.toDouble()
-                        
-                        val wz1 = currentZ
-                        val wz2 = wz1 + h3d
-                        
-                        // 6 faces
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Color.ORANGE, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz2), Vector3D(x2, y1, wz2), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), Color.ORANGE, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), Color.ORANGE, true))
-                        model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), Color.ORANGE, true))
-                        model3d.rects.add(Rect3D(Vector3D(x2, y2, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x2, y2, wz2), Color.ORANGE, true))
-                        model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x1, y1, wz1), Vector3D(x1, y1, wz2), Vector3D(x1, y2, wz2), Color.ORANGE, true))
+                        // Doors are now just openings, no colored bars
                     }
                 }
             }
@@ -743,6 +918,18 @@ class FloorPlanApp {
         threeDDocuments.add(doc3d)
         val window = ThreeDWindow(this, doc3d)
         window.jMenuBar = createMenuBar()
+    }
+
+    private fun areAdjacentRooms(r1: Room, r2: Room): Boolean {
+        val rect1 = r1.getBounds()
+        val rect2 = r2.getBounds()
+        if (rect1.y < rect2.y + rect2.height && rect1.y + rect1.height > rect2.y) {
+            if (rect1.x == rect2.x + rect2.width || rect2.x == rect1.x + rect1.width) return true
+        }
+        if (rect1.x < rect2.x + rect2.width && rect1.x + rect1.width > rect2.x) {
+            if (rect1.y == rect2.y + rect2.height || rect2.y == rect1.y + rect1.height) return true
+        }
+        return false
     }
 
     private fun setupPopupMenu() {
