@@ -8,6 +8,8 @@ import javax.swing.*
 class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
     private lateinit var zoomInBtn: JButton
     private lateinit var zoomOutBtn: JButton
+    private lateinit var walkModeBtn: JToggleButton
+    private lateinit var controlsLabel: JLabel
     
     init {
         doc.window = this
@@ -55,6 +57,40 @@ class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
         }
         toolBar.add(zoomInBtn)
         
+        toolBar.addSeparator()
+        
+        // Walk mode toggle button
+        walkModeBtn = JToggleButton("🚶 Walk Mode")
+        walkModeBtn.toolTipText = "Enter first-person walking mode (WASD to move, mouse to look)"
+        walkModeBtn.addActionListener {
+            if (walkModeBtn.isSelected) {
+                // Enter walk mode
+                doc.cameraMode = CameraMode.WALK
+                doc.initializePlayerPosition()
+                doc.panel.updateCamera()
+                doc.panel.requestFocusInWindow()
+                controlsLabel.isVisible = true
+                zoomInBtn.isEnabled = false
+                zoomOutBtn.isEnabled = false
+            } else {
+                // Return to orbit mode
+                doc.cameraMode = CameraMode.ORBIT
+                doc.panel.updateCamera()
+                controlsLabel.isVisible = false
+                zoomInBtn.isEnabled = true
+                zoomOutBtn.isEnabled = true
+            }
+        }
+        toolBar.add(walkModeBtn)
+        
+        toolBar.addSeparator()
+        
+        // Controls help label (shown only in walk mode)
+        controlsLabel = JLabel("  WASD: Move | Mouse: Look | Space/Shift: Up/Down | ESC: Exit")
+        controlsLabel.foreground = Color.DARK_GRAY
+        controlsLabel.isVisible = false
+        toolBar.add(controlsLabel)
+        
         add(toolBar, BorderLayout.NORTH)
         
         listOf(zoomInBtn, zoomOutBtn).forEach {
@@ -62,5 +98,23 @@ class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
             it.maximumSize = Dimension(80, 30)
             it.minimumSize = Dimension(50, 30)
         }
+        
+        walkModeBtn.preferredSize = Dimension(120, 30)
+        walkModeBtn.maximumSize = Dimension(140, 30)
+        walkModeBtn.minimumSize = Dimension(100, 30)
+        
+        // Add ESC key listener to exit walk mode
+        doc.panel.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (e.keyCode == java.awt.event.KeyEvent.VK_ESCAPE && doc.cameraMode == CameraMode.WALK) {
+                    walkModeBtn.isSelected = false
+                    doc.cameraMode = CameraMode.ORBIT
+                    doc.panel.updateCamera()
+                    controlsLabel.isVisible = false
+                    zoomInBtn.isEnabled = true
+                    zoomOutBtn.isEnabled = true
+                }
+            }
+        })
     }
 }

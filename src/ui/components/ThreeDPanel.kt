@@ -13,6 +13,7 @@ import javafx.scene.transform.Translate
 import model.Rect3D
 import model.Triangle3D
 import model.Vector3D
+import ui.CameraMode
 import ui.ThreeDDocument
 import java.awt.event.KeyEvent
 import javax.swing.JPanel
@@ -39,6 +40,10 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     private var lastMouseX = 0.0
     private var lastMouseY = 0.0
     
+    // Walk mode - keyboard state
+    private val keysPressed = mutableSetOf<Int>()
+    private var walkTimer: Timer? = null
+    
     init {
         layout = java.awt.BorderLayout()
         add(fxPanel, java.awt.BorderLayout.CENTER)
@@ -50,6 +55,26 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         }
         
         isFocusable = true
+        
+        // Setup keyboard listener for walk mode
+        addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (doc.cameraMode == CameraMode.WALK) {
+                    keysPressed.add(e.keyCode)
+                }
+            }
+            override fun keyReleased(e: java.awt.event.KeyEvent) {
+                keysPressed.remove(e.keyCode)
+            }
+        })
+        
+        // Timer for smooth movement in walk mode (60 FPS)
+        walkTimer = Timer(16) {
+            if (doc.cameraMode == CameraMode.WALK && keysPressed.isNotEmpty()) {
+                processWalkMovement()
+            }
+        }
+        walkTimer?.start()
     }
     
     private fun setupFXScene() {
@@ -122,7 +147,8 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         scene.setOnMousePressed { e ->
             lastMouseX = e.sceneX
             lastMouseY = e.sceneY
-            Platform.runLater { fxPanel.requestFocus() }
+            // Request focus on the parent panel (ThreeDPanel) so keyboard events work
+            SwingUtilities.invokeLater { this@ThreeDPanel.requestFocusInWindow() }
         }
         
         scene.setOnMouseDragged { e ->
@@ -143,9 +169,291 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     }
     
     private fun handleMouseMoveFX(dx: Double, dy: Double) {
-        doc.rotationZ -= dx * 0.5
-        doc.rotationX = (doc.rotationX + dy * 0.5).coerceIn(0.0, 90.0)
+        if (doc.cameraMode == CameraMode.WALK) {
+            // Walk mode: mouse controls look direction
+            // Moving mouse right (positive dx) should rotate view right (increase yaw)
+            doc.playerYaw += dx * 0.3
+            doc.playerPitch = (doc.playerPitch - dy * 0.3).coerceIn(-89.0, 89.0)
+            updateCamera()
+        } else {
+            // Orbit mode: mouse controls orbit rotation
+            doc.rotationZ -= dx * 0.5
+            doc.rotationX = (doc.rotationX + dy * 0.5).coerceIn(0.0, 90.0)
+            updateCamera()
+        }
+    }
+    
+    private fun processWalkMovement() {
+        val speed = doc.moveSpeed
+        // Camera uses -playerYaw for rotation, so we need to use the same angle for movement
+        // to match the camera's actual view direction
+        val yawRad = Math.toRadians(-doc.playerYaw)
+        
+        // Calculate forward and right vectors based on camera's actual view direction
+        // Forward is the direction the camera is looking (flat projection on XY plane)
+        val forwardX = sin(yawRad)
+        val forwardY = -cos(yawRad)
+        val rightX = cos(yawRad)
+        val rightY = sin(yawRad)
+        
+        var moveX = 0.0
+        var moveY = 0.0
+        
+        // WASD and Arrow keys movement (W=backward, S=forward)
+        if (keysPressed.contains(java.awt.event.KeyEvent.VK_W) || keysPressed.contains(java.awt.event.KeyEvent.VK_UP)) {
+            moveX -= forwardX * speed
+            moveY -= forwardY * speed
+        }
+        if (keysPressed.contains(java.awt.event.KeyEvent.VK_S) || keysPressed.contains(java.awt.event.KeyEvent.VK_DOWN)) {
+            moveX += forwardX * speed
+            moveY += forwardY * speed
+        }
+        if (keysPressed.contains(java.awt.event.KeyEvent.VK_A) || keysPressed.contains(java.awt.event.KeyEvent.VK_LEFT)) {
+            moveX += rightX * speed
+            moveY += rightY * speed
+        }
+        if (keysPressed.contains(java.awt.event.KeyEvent.VK_D) || keysPressed.contains(java.awt.event.KeyEvent.VK_RIGHT)) {
+            moveX -= rightX * speed
+            moveY -= rightY * speed
+        }
+        
+        // Jump - Space key applies upward impulse when on ground
+        if (keysPressed.contains(java.awt.event.KeyEvent.VK_SPACE) && doc.isOnGround) {
+            doc.verticalVelocity = doc.jumpImpulse
+            doc.isOnGround = false
+        }
+        
+        // Apply gravity to vertical velocity
+        doc.verticalVelocity += doc.gravity
+        
+        // Calculate new position
+        val newX = doc.playerX + moveX
+        val newY = doc.playerY + moveY
+        var newZ = doc.playerZ + doc.verticalVelocity
+        
+        // Calculate floor height at new position (for stairs and ground)
+        val stairFloorZ = getFloorHeight(newX, newY, doc.playerZ)
+        
+        // Get the base floor level from model bounds
+        val modelBounds = doc.model.getBounds()
+        val baseFloorZ = modelBounds.first.z
+        
+        // Determine the effective floor height (stairs or base floor)
+        val effectiveFloorZ = if (stairFloorZ > Double.MIN_VALUE) stairFloorZ else baseFloorZ
+        val groundZ = effectiveFloorZ + doc.playerHeight
+        
+        // Check for ceiling collision when moving upward
+        if (doc.verticalVelocity > 0) {
+            val ceilingZ = getCeilingHeight(newX, newY, doc.playerZ)
+            if (ceilingZ < Double.MAX_VALUE && newZ >= ceilingZ) {
+                // Hit the ceiling - stop upward movement
+                newZ = ceilingZ - 1.0  // Small margin below ceiling
+                doc.verticalVelocity = 0.0  // Stop upward velocity, start falling
+            }
+        }
+        
+        // Check if player has landed on ground
+        if (newZ <= groundZ) {
+            newZ = groundZ
+            doc.verticalVelocity = 0.0
+            doc.isOnGround = true
+        } else {
+            doc.isOnGround = false
+        }
+        
+        // Simple collision check - try to move, check for wall collisions
+        if (!checkWallCollision(newX, newY, newZ)) {
+            doc.playerX = newX
+            doc.playerY = newY
+            doc.playerZ = newZ
+        } else {
+            // Try sliding along walls - check X and Y separately
+            if (!checkWallCollision(newX, doc.playerY, newZ)) {
+                doc.playerX = newX
+                doc.playerZ = newZ
+            } else if (!checkWallCollision(doc.playerX, newY, newZ)) {
+                doc.playerY = newY
+                doc.playerZ = newZ
+            } else {
+                // Can't move horizontally, but still apply vertical movement
+                doc.playerZ = newZ
+            }
+        }
+        
         updateCamera()
+    }
+    
+    private fun checkWallCollision(x: Double, y: Double, z: Double): Boolean {
+        val playerRadius = doc.playerRadius
+        val playerBottom = z - doc.playerHeight + 10  // Feet level + small margin
+        val playerTop = z + 10  // Head level + small margin
+        
+        // Check if player is within any door opening - if so, allow passage
+        for (door in doc.model.doorInfos) {
+            if (door.isInOpening(x, y, z, playerRadius)) {
+                return false  // Player is in a door opening, no collision
+            }
+        }
+        
+        // Check collision with all wall rectangles
+        for (rect in doc.model.rects) {
+            if (rect.isWindow) continue  // Skip windows
+            if (rect.isStairsVisualOnly) continue  // Skip stairs slabs (visual only)
+            
+            // Get the bounding box of the rectangle in model coordinates
+            val minX = minOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val maxX = maxOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val minY = minOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val maxY = maxOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val minZ = minOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            val maxZ = maxOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            
+            // Skip floor/ceiling surfaces (horizontal surfaces)
+            val isHorizontal = (maxZ - minZ) < 1.0
+            if (isHorizontal) continue
+            
+            // Check if player cylinder intersects with wall box
+            // Expand wall box by player radius for cylinder collision
+            val expandedMinX = minX - playerRadius
+            val expandedMaxX = maxX + playerRadius
+            val expandedMinY = minY - playerRadius
+            val expandedMaxY = maxY + playerRadius
+            
+            // Check XY overlap
+            if (x >= expandedMinX && x <= expandedMaxX &&
+                y >= expandedMinY && y <= expandedMaxY) {
+                // Check Z overlap
+                if (playerTop >= minZ && playerBottom <= maxZ) {
+                    return true  // Collision detected
+                }
+            }
+        }
+        return false
+    }
+    
+    private fun getFloorHeight(x: Double, y: Double, currentZ: Double): Double {
+        // Check if player is on any stairs and return the floor height
+        // Allow automatic step-up for stair climbing (typical step height is ~17cm)
+        // Use a generous margin to allow smooth stair walking without jumping
+        var maxFloorZ = Double.MIN_VALUE
+        val playerFeet = currentZ - doc.playerHeight
+        
+        // Step-up height: how high the player can automatically step up without jumping
+        // Set to 25cm to accommodate typical stair steps (17cm) with some margin
+        val maxStepUp = 25.0
+        
+        for (stair in doc.model.stairInfos) {
+            val stairZ = stair.getFloorZ(x, y)
+            if (stairZ > Double.MIN_VALUE) {
+                // Allow stepping up onto stairs that are within step-up height above current feet
+                // Also allow stairs below current feet (walking down stairs)
+                if (stairZ <= playerFeet + maxStepUp && stairZ > maxFloorZ) {
+                    maxFloorZ = stairZ
+                }
+            }
+        }
+        
+        // Also check floor slabs (horizontal surfaces from rectangles) - prevents getting stuck inside them
+        for (rect in doc.model.rects) {
+            if (rect.isWindow) continue
+            if (rect.isStairsVisualOnly) continue  // Skip stairs slabs (visual only)
+            
+            val minX = minOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val maxX = maxOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val minY = minOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val maxY = maxOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val minZ = minOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            val maxZ = maxOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            
+            // Check if this is a horizontal surface (floor/ceiling)
+            val isHorizontal = (maxZ - minZ) < 1.0
+            if (!isHorizontal) continue
+            
+            // Check if player is within XY bounds of this surface
+            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                // Use the top of the surface as floor height
+                // Allow stepping up onto floors within step-up height
+                if (maxZ <= playerFeet + maxStepUp && maxZ > maxFloorZ) {
+                    maxFloorZ = maxZ
+                }
+            }
+        }
+        
+        // Also check triangular surfaces (from PolygonRoom floor slabs)
+        // Use bounding box clipping (same approach as rectangular room slabs) for more reliable collision
+        for (tri in doc.model.triangles) {
+            if (tri.isStairsVisualOnly) continue  // Skip stairs sides (visual only)
+            val minX = minOf(tri.v1.x, tri.v2.x, tri.v3.x)
+            val maxX = maxOf(tri.v1.x, tri.v2.x, tri.v3.x)
+            val minY = minOf(tri.v1.y, tri.v2.y, tri.v3.y)
+            val maxY = maxOf(tri.v1.y, tri.v2.y, tri.v3.y)
+            val minZ = minOf(tri.v1.z, tri.v2.z, tri.v3.z)
+            val maxZ = maxOf(tri.v1.z, tri.v2.z, tri.v3.z)
+            
+            // Check if this is a horizontal surface (floor/ceiling)
+            val isHorizontal = (maxZ - minZ) < 1.0
+            if (!isHorizontal) continue
+            
+            // Check if player is within the bounding box of the triangle (minimal rectangular slab)
+            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                // Use the top of the surface as floor height
+                // Allow stepping up onto floors within step-up height
+                if (maxZ <= playerFeet + maxStepUp && maxZ > maxFloorZ) {
+                    maxFloorZ = maxZ
+                }
+            }
+        }
+        
+        return maxFloorZ
+    }
+    
+    private fun isPointInTriangle(px: Double, py: Double, 
+                                   x1: Double, y1: Double, 
+                                   x2: Double, y2: Double, 
+                                   x3: Double, y3: Double): Boolean {
+        // Use barycentric coordinate method to check if point is inside triangle
+        val denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        if (abs(denom) < 1e-10) return false  // Degenerate triangle
+        
+        val a = ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)) / denom
+        val b = ((y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)) / denom
+        val c = 1.0 - a - b
+        
+        // Point is inside if all barycentric coordinates are between 0 and 1
+        return a >= 0 && a <= 1 && b >= 0 && b <= 1 && c >= 0 && c <= 1
+    }
+    
+    private fun getCeilingHeight(x: Double, y: Double, currentZ: Double): Double {
+        // Find the lowest ceiling (bottom of horizontal surface) above the player's head
+        var minCeilingZ = Double.MAX_VALUE
+        val playerHead = currentZ  // Player's eye/head level
+        
+        for (rect in doc.model.rects) {
+            if (rect.isWindow) continue
+            if (rect.isStairsVisualOnly) continue  // Skip stairs slabs (visual only)
+            
+            val minX = minOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val maxX = maxOf(rect.v1.x, rect.v2.x, rect.v3.x, rect.v4.x)
+            val minY = minOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val maxY = maxOf(rect.v1.y, rect.v2.y, rect.v3.y, rect.v4.y)
+            val minZ = minOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            val maxZ = maxOf(rect.v1.z, rect.v2.z, rect.v3.z, rect.v4.z)
+            
+            // Check if this is a horizontal surface (floor/ceiling)
+            val isHorizontal = (maxZ - minZ) < 1.0
+            if (!isHorizontal) continue
+            
+            // Check if player is within XY bounds of this surface
+            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                // Use the bottom of the surface as ceiling height
+                // Only consider surfaces that are above the player's head
+                if (minZ > playerHead && minZ < minCeilingZ) {
+                    minCeilingZ = minZ
+                }
+            }
+        }
+        
+        return minCeilingZ
     }
 
     fun updateModel() {
@@ -281,52 +589,113 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
 
     fun updateCamera() {
         Platform.runLater {
-            // Orbit mode only
-            val bounds = doc.model.getBounds()
-            val min = bounds.first
-            val max = bounds.second
-            
-            val width = max.x - min.x
-            val height = max.z - min.z // In FX y is -z
-            val depth = max.y - min.y // In FX z is y
-            
-            val radius = sqrt(width * width + height * height + depth * depth) / 2.0
-            
-            // Calculate distance based on FOV
-            val fov = camera?.fieldOfView ?: 45.0
-            val halfFovRad = Math.toRadians(fov / 2.0)
-            
-            val aspectRatio = if (fxPanel.width > 0 && fxPanel.height > 0) fxPanel.width.toDouble() / fxPanel.height.toDouble() else 1000.0 / 700.0
-            
-            val effectiveHalfFovRad = if (aspectRatio >= 1.0) {
-                halfFovRad
+            if (doc.cameraMode == CameraMode.WALK) {
+                updateWalkCamera()
             } else {
-                atan(tan(halfFovRad) * aspectRatio)
+                updateOrbitCamera()
             }
-            
-            // Add a small margin (1.1x)
-            val autoDistance = (radius / sin(effectiveHalfFovRad)) * 1.1
-            val distance = (if (autoDistance > 0) autoDistance else 1000.0) / doc.scale
-            
-            cameraZRotate?.axis = Rotate.Y_AXIS
-            cameraZRotate?.angle = -doc.rotationZ
-            
-            cameraXRotate?.axis = Rotate.X_AXIS
-            cameraXRotate?.angle = doc.rotationX - 90.0
-            
-            // Since modelGroup is centered at (0,0,0), camera rotates around (0,0,0)
-            cameraTranslate?.x = 0.0
-            cameraTranslate?.y = 0.0
-            cameraTranslate?.z = 0.0
-            
-            camera?.translateX = 0.0
-            camera?.translateY = 0.0
-            camera?.translateZ = -distance
-            
-            // Aggressive near and far clip to avoid any clipping
-            camera?.nearClip = 0.1
-            camera?.farClip = max(100000.0, distance * 100.0)
         }
+    }
+    
+    private fun updateOrbitCamera() {
+        val bounds = doc.model.getBounds()
+        val min = bounds.first
+        val max = bounds.second
+        
+        val width = max.x - min.x
+        val height = max.z - min.z // In FX y is -z
+        val depth = max.y - min.y // In FX z is y
+        
+        val radius = sqrt(width * width + height * height + depth * depth) / 2.0
+        
+        // Calculate distance based on FOV
+        val fov = camera?.fieldOfView ?: 45.0
+        val halfFovRad = Math.toRadians(fov / 2.0)
+        
+        val aspectRatio = if (fxPanel.width > 0 && fxPanel.height > 0) fxPanel.width.toDouble() / fxPanel.height.toDouble() else 1000.0 / 700.0
+        
+        val effectiveHalfFovRad = if (aspectRatio >= 1.0) {
+            halfFovRad
+        } else {
+            atan(tan(halfFovRad) * aspectRatio)
+        }
+        
+        // Add a small margin (1.1x)
+        val autoDistance = (radius / sin(effectiveHalfFovRad)) * 1.1
+        val distance = (if (autoDistance > 0) autoDistance else 1000.0) / doc.scale
+        
+        // For orbit mode, we need transform order: rotate THEN translate
+        // This makes rotation happen around the scene origin (0,0,0)
+        // Reorder transforms: ry, rx, tr (rotations first, then translate)
+        cameraXform?.transforms?.clear()
+        cameraXform?.transforms?.addAll(cameraZRotate, cameraXRotate, cameraTranslate)
+        
+        cameraZRotate?.axis = Rotate.Y_AXIS
+        cameraZRotate?.angle = -doc.rotationZ
+        
+        cameraXRotate?.axis = Rotate.X_AXIS
+        cameraXRotate?.angle = doc.rotationX - 90.0
+        
+        // Since modelGroup is centered at (0,0,0), camera rotates around (0,0,0)
+        cameraTranslate?.x = 0.0
+        cameraTranslate?.y = 0.0
+        cameraTranslate?.z = 0.0
+        
+        camera?.translateX = 0.0
+        camera?.translateY = 0.0
+        camera?.translateZ = -distance
+        
+        // Aggressive near and far clip to avoid any clipping
+        camera?.nearClip = 0.1
+        camera?.farClip = max(100000.0, distance * 100.0)
+        
+        // Reset FOV to default for orbit view
+        camera?.fieldOfView = 45.0
+    }
+    
+    private fun updateWalkCamera() {
+        // In walk mode, position camera at player location looking in player direction
+        // Model coordinates: (x, y, z) where z is up
+        // FX coordinates: (-x, -z, y) - X mirrored, Y is -Z, Z is Y
+        
+        val center = doc.model.getCenter()
+        
+        // Player position in model coordinates, adjusted for model centering
+        val playerFxX = -doc.playerX + center.x
+        val playerFxY = -doc.playerZ + center.z  // FX Y is -Model Z
+        val playerFxZ = doc.playerY - center.y   // FX Z is Model Y
+        
+        // For walk mode, we need transform order: translate THEN rotate
+        // This makes rotation happen around the player's position (camera eye)
+        // Reorder transforms: tr, ry, rx (translate first, then rotations)
+        cameraXform?.transforms?.clear()
+        cameraXform?.transforms?.addAll(cameraTranslate, cameraZRotate, cameraXRotate)
+        
+        // Set camera rotation based on player look direction
+        // Yaw rotates around Y axis (vertical in FX)
+        // Pitch rotates around X axis
+        cameraZRotate?.axis = Rotate.Y_AXIS
+        cameraZRotate?.angle = -doc.playerYaw
+        
+        cameraXRotate?.axis = Rotate.X_AXIS
+        cameraXRotate?.angle = -doc.playerPitch
+        
+        // Position the camera transform at player position
+        cameraTranslate?.x = playerFxX
+        cameraTranslate?.y = playerFxY
+        cameraTranslate?.z = playerFxZ
+        
+        // Camera itself is at origin of its transform group
+        camera?.translateX = 0.0
+        camera?.translateY = 0.0
+        camera?.translateZ = 0.0
+        
+        // Set appropriate clip planes for indoor viewing
+        camera?.nearClip = 1.0
+        camera?.farClip = 100000.0
+        
+        // Wider FOV for first-person view
+        camera?.fieldOfView = 70.0
     }
 
 

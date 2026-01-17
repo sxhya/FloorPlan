@@ -13,6 +13,7 @@ import model.PolygonRoom
 import javafx.application.Platform
 import ui.components.SidePanel
 import ui.components.StatisticsPanel
+import ui.components.ThreeDSidePanel
 import java.awt.*
 import java.awt.image.BufferedImage
 import java.io.File
@@ -34,6 +35,7 @@ class FloorPlanApp {
     
     internal val sidePanel = SidePanel(this)
     internal val statsPanel = StatisticsPanel(this)
+    internal val threeDSidePanel = ThreeDSidePanel(this)
     
     private var sidePanelWindow: SidePanelWindow? = null
     
@@ -971,7 +973,15 @@ class FloorPlanApp {
                         }
                     }
                     is Door -> {
-                        // Doors are now just openings, no colored bars
+                        // Doors are openings - store door info for collision detection in walk mode
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val doorZ1 = currentZ  // Door starts at floor level
+                        val doorZ2 = currentZ + el.verticalHeight.toDouble()  // Door top
+                        
+                        model3d.doorInfos.add(model.DoorInfo(x1, y1, x2, y2, doorZ1, doorZ2))
                     }
                     is Stairs -> {
                         // Create a realistic staircase
@@ -1002,10 +1012,17 @@ class FloorPlanApp {
                         // The Z for (X2, Y2) point is computed by adding zOffset and totalRaise
                         val baseZ = currentZ + el.zOffset.toDouble()
                         
+                        // Store stair info for walk mode height calculation
+                        model3d.stairInfos.add(model.StairInfo(x1, y1, x2, y2, baseZ, totalRaise, isAlongX))
+                        
                         // Stair color
                         val stairColor = Color(139, 119, 101) // Brown/wood color
+                        val slabColor = Color(160, 140, 120) // Slightly lighter for the slab
                         
-                        // Generate each step (only treads and risers, no side stringers)
+                        // Slab thickness for the inclined ladder slab below stairs
+                        val slabThickness = 15.0
+                        
+                        // Generate each step (treads and risers)
                         for (step in 0 until numSteps) {
                             val stepZ = baseZ + step * actualStepHeight
                             val nextStepZ = baseZ + (step + 1) * actualStepHeight
@@ -1036,6 +1053,39 @@ class FloorPlanApp {
                                         stairColor
                                     ))
                                 }
+                                
+                                // Side triangles for this step (at y1 and y2)
+                                // Triangle at y1 side (front side when looking from y1)
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(stepX1, y1, stepZ),
+                                    Vector3D(stepX2, y1, stepZ),
+                                    Vector3D(stepX2, y1, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(stepX1, y1, stepZ),
+                                    Vector3D(stepX2, y1, nextStepZ),
+                                    Vector3D(stepX1, y1, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                
+                                // Triangle at y2 side (back side)
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(stepX1, y2, stepZ),
+                                    Vector3D(stepX2, y2, nextStepZ),
+                                    Vector3D(stepX2, y2, stepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(stepX1, y2, stepZ),
+                                    Vector3D(stepX1, y2, nextStepZ),
+                                    Vector3D(stepX2, y2, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
                             } else {
                                 // Stairs along Y axis
                                 val stepY1 = if (totalRaise >= 0) y1 + step * actualStepDepth else y2 - (step + 1) * actualStepDepth
@@ -1062,7 +1112,154 @@ class FloorPlanApp {
                                         stairColor
                                     ))
                                 }
+                                
+                                // Side triangles for this step (at x1 and x2)
+                                // Triangle at x1 side
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(x1, stepY1, stepZ),
+                                    Vector3D(x1, stepY2, nextStepZ),
+                                    Vector3D(x1, stepY2, stepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(x1, stepY1, stepZ),
+                                    Vector3D(x1, stepY1, nextStepZ),
+                                    Vector3D(x1, stepY2, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                
+                                // Triangle at x2 side
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(x2, stepY1, stepZ),
+                                    Vector3D(x2, stepY2, stepZ),
+                                    Vector3D(x2, stepY2, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(x2, stepY1, stepZ),
+                                    Vector3D(x2, stepY2, nextStepZ),
+                                    Vector3D(x2, stepY1, nextStepZ),
+                                    stairColor,
+                                    isStairsVisualOnly = true
+                                ))
                             }
+                        }
+                        
+                        // Add inclined 15cm thick slab below the stairs (the stringer/ladder slab)
+                        // This is a parallelogram-shaped slab that follows the stair incline
+                        val endZ = baseZ + totalRaise
+                        val slabTopStartZ = baseZ  // Top surface at start
+                        val slabTopEndZ = endZ     // Top surface at end
+                        val slabBottomStartZ = baseZ - slabThickness  // Bottom surface at start
+                        val slabBottomEndZ = endZ - slabThickness     // Bottom surface at end
+                        
+                        if (isAlongX) {
+                            // Stairs along X axis - slab runs from x1 to x2
+                            val slabStartX = if (totalRaise >= 0) x1 else x2
+                            val slabEndX = if (totalRaise >= 0) x2 else x1
+                            
+                            // Top inclined surface
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabStartX, y1, slabTopStartZ), Vector3D(slabEndX, y1, slabTopEndZ),
+                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabStartX, y2, slabTopStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Bottom inclined surface
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y2, slabBottomStartZ),
+                                Vector3D(slabEndX, y2, slabBottomEndZ), Vector3D(slabEndX, y1, slabBottomEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Side surface at y1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabEndX, y1, slabBottomEndZ),
+                                Vector3D(slabEndX, y1, slabTopEndZ), Vector3D(slabStartX, y1, slabTopStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Side surface at y2
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabStartX, y2, slabBottomStartZ), Vector3D(slabStartX, y2, slabTopStartZ),
+                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y2, slabBottomEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // End cap at start (vertical rectangle)
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y1, slabTopStartZ),
+                                Vector3D(slabStartX, y2, slabTopStartZ), Vector3D(slabStartX, y2, slabBottomStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // End cap at end (vertical rectangle)
+                            model3d.rects.add(Rect3D(
+                                Vector3D(slabEndX, y1, slabBottomEndZ), Vector3D(slabEndX, y2, slabBottomEndZ),
+                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y1, slabTopEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                        } else {
+                            // Stairs along Y axis - slab runs from y1 to y2
+                            val slabStartY = if (totalRaise >= 0) y1 else y2
+                            val slabEndY = if (totalRaise >= 0) y2 else y1
+                            
+                            // Top inclined surface
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, slabStartY, slabTopStartZ), Vector3D(x2, slabStartY, slabTopStartZ),
+                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabTopEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Bottom inclined surface
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabEndY, slabBottomEndZ),
+                                Vector3D(x2, slabEndY, slabBottomEndZ), Vector3D(x2, slabStartY, slabBottomStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Side surface at x1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabStartY, slabTopStartZ),
+                                Vector3D(x1, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabBottomEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // Side surface at x2
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x2, slabStartY, slabBottomStartZ), Vector3D(x2, slabEndY, slabBottomEndZ),
+                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabStartY, slabTopStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // End cap at start (vertical rectangle)
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x2, slabStartY, slabBottomStartZ),
+                                Vector3D(x2, slabStartY, slabTopStartZ), Vector3D(x1, slabStartY, slabTopStartZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
+                            
+                            // End cap at end (vertical rectangle)
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, slabEndY, slabBottomEndZ), Vector3D(x1, slabEndY, slabTopEndZ),
+                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabEndY, slabBottomEndZ),
+                                slabColor,
+                                isStairsVisualOnly = true
+                            ))
                         }
                     }
                 }
@@ -1234,6 +1431,469 @@ class FloorPlanApp {
             doc.canvas.repaint()
         }
     }
+    
+    fun getOpenDocuments(): List<FloorPlanDocument> = documents.toList()
+    
+    fun regenerate3DModelFromFloors(doc3d: ThreeDDocument) {
+        // Parse floor files and regenerate the 3D model
+        val floors = mutableListOf<FloorInfo>()
+        val docFactory = DocumentBuilderFactory.newInstance()
+        val docBuilder = docFactory.newDocumentBuilder()
+        
+        for (floorData in doc3d.floors) {
+            val floorFile = File(floorData.filePath)
+            if (floorFile.exists()) {
+                try {
+                    val floorXmlDoc = docBuilder.parse(floorFile)
+                    floorXmlDoc.documentElement.normalize()
+                    val floorElements = parseFloorElements(floorXmlDoc)
+                    val floorDoc = FloorPlanDocument(this)
+                    floorDoc.elements.addAll(floorElements)
+                    floorDoc.currentFile = floorFile
+                    floors.add(FloorInfo(floorDoc, floorData.height))
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        
+        if (floors.isNotEmpty()) {
+            // Regenerate the model in place using the internal generation function
+            val newModel = buildModel3D(floors, doc3d)
+            doc3d.model = newModel
+            doc3d.panel.updateModel()
+        }
+    }
+    
+    // Internal function to build Model3D from floor info - extracted from generate3DModel
+    private fun buildModel3D(floors: List<FloorInfo>, doc3d: ThreeDDocument): model.Model3D {
+        val model3d = model.Model3D()
+        
+        var currentZ = 0.0
+        for ((floorIndex, floor) in floors.withIndex()) {
+            val floorHeight = floor.height.toDouble()
+            val roomsOnFloor = floor.doc.elements.filterIsInstance<Room>()
+            
+            // Compute light positions based on dockedness components
+            val roomsWithoutOffset = roomsOnFloor.filter { it.zOffset == 0 }
+            if (roomsWithoutOffset.isNotEmpty()) {
+                val centerZ = currentZ + floorHeight / 2.0
+                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
+                for (i in roomsWithoutOffset.indices) {
+                    for (j in i + 1 until roomsWithoutOffset.size) {
+                        val r1 = roomsWithoutOffset[i]
+                        val r2 = roomsWithoutOffset[j]
+                        if (areAdjacentRooms(r1, r2)) {
+                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
+                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
+                        }
+                    }
+                }
+                
+                val visited = mutableSetOf<Room>()
+                for (room in roomsWithoutOffset) {
+                    if (room !in visited) {
+                        val component = mutableListOf<Room>()
+                        val queue: java.util.Queue<Room> = java.util.LinkedList()
+                        queue.add(room)
+                        visited.add(room)
+                        while (queue.isNotEmpty()) {
+                            val r = queue.poll()
+                            component.add(r)
+                            adjacency[r]?.forEach { neighbor ->
+                                if (neighbor !in visited) {
+                                    visited.add(neighbor)
+                                    queue.add(neighbor)
+                                }
+                            }
+                        }
+                        
+                        val largestRoom = component.maxByOrNull { it.width.toDouble() * it.height.toDouble() }
+                        if (largestRoom != null) {
+                            val centerX = largestRoom.x.toDouble() + largestRoom.width.toDouble() / 2.0
+                            val centerY = largestRoom.y.toDouble() + largestRoom.height.toDouble() / 2.0
+                            model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
+                        }
+                    }
+                }
+            }
+
+            // Check if this floor should be drawn (get draw flag from doc3d.floors)
+            val floorData = doc3d.floors.getOrNull(floorIndex)
+            val shouldDraw = floorData?.draw ?: true
+            val floorAlpha = if (shouldDraw) 255 else 51  // 80% transparency = 20% opacity = 51/255
+
+            for (el in floor.doc.elements) {
+                when (el) {
+                    is Room -> {
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val thickness = el.floorThickness.toDouble()
+                        val zOff = el.zOffset.toDouble()
+                        val slabTopZ = currentZ + zOff
+                        val slabBottomZ = slabTopZ - thickness
+                        
+                        val otherRooms = roomsOnFloor.filter { it !== el }
+                        val hasAdjacentTop = otherRooms.any { other ->
+                            other.y + other.height == el.y && 
+                            other.x < el.x + el.width && other.x + other.width > el.x
+                        }
+                        val hasAdjacentBottom = otherRooms.any { other ->
+                            other.y == el.y + el.height && 
+                            other.x < el.x + el.width && other.x + other.width > el.x
+                        }
+                        val hasAdjacentLeft = otherRooms.any { other ->
+                            other.x + other.width == el.x && 
+                            other.y < el.y + el.height && other.y + other.height > el.y
+                        }
+                        val hasAdjacentRight = otherRooms.any { other ->
+                            other.x == el.x + el.width && 
+                            other.y < el.y + el.height && other.y + other.height > el.y
+                        }
+                        
+                        val slabColor = Color(Color.LIGHT_GRAY.red, Color.LIGHT_GRAY.green, Color.LIGHT_GRAY.blue, floorAlpha)
+                        
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y1, slabTopZ), Vector3D(x2, y1, slabTopZ),
+                            Vector3D(x2, y2, slabTopZ), Vector3D(x1, y2, slabTopZ),
+                            slabColor
+                        ))
+                        model3d.rects.add(Rect3D(
+                            Vector3D(x1, y1, slabBottomZ), Vector3D(x2, y1, slabBottomZ),
+                            Vector3D(x2, y2, slabBottomZ), Vector3D(x1, y2, slabBottomZ),
+                            slabColor
+                        ))
+                        if (!hasAdjacentTop) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, y1, slabBottomZ), Vector3D(x2, y1, slabBottomZ),
+                                Vector3D(x2, y1, slabTopZ), Vector3D(x1, y1, slabTopZ),
+                                slabColor
+                            ))
+                        }
+                        if (!hasAdjacentRight) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x2, y1, slabBottomZ), Vector3D(x2, y2, slabBottomZ),
+                                Vector3D(x2, y2, slabTopZ), Vector3D(x2, y1, slabTopZ),
+                                slabColor
+                            ))
+                        }
+                        if (!hasAdjacentBottom) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x2, y2, slabBottomZ), Vector3D(x1, y2, slabBottomZ),
+                                Vector3D(x1, y2, slabTopZ), Vector3D(x2, y2, slabTopZ),
+                                slabColor
+                            ))
+                        }
+                        if (!hasAdjacentLeft) {
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, y2, slabBottomZ), Vector3D(x1, y1, slabBottomZ),
+                                Vector3D(x1, y1, slabTopZ), Vector3D(x1, y2, slabTopZ),
+                                slabColor
+                            ))
+                        }
+                    }
+                    is PolygonRoom -> {
+                        val thickness = el.floorThickness.toDouble()
+                        val zOff = el.zOffset.toDouble()
+                        val slabTopZ = currentZ + zOff
+                        val slabBottomZ = slabTopZ - thickness
+                        val vertices = el.vertices
+                        
+                        val slabColor = Color(Color.LIGHT_GRAY.red, Color.LIGHT_GRAY.green, Color.LIGHT_GRAY.blue, floorAlpha)
+                        
+                        if (vertices.size >= 3) {
+                            val centroidX = vertices.sumOf { it.x.toDouble() } / vertices.size
+                            val centroidY = vertices.sumOf { it.y.toDouble() } / vertices.size
+                            
+                            for (i in vertices.indices) {
+                                val v1 = vertices[i]
+                                val v2 = vertices[(i + 1) % vertices.size]
+                                
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(centroidX, centroidY, slabTopZ),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabTopZ),
+                                    slabColor
+                                ))
+                                
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(centroidX, centroidY, slabBottomZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabBottomZ),
+                                    slabColor
+                                ))
+                                
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabBottomZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
+                                    slabColor
+                                ))
+                                model3d.triangles.add(Triangle3D(
+                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
+                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabTopZ),
+                                    slabColor
+                                ))
+                            }
+                        }
+                    }
+                    is Wall -> {
+                        val wallBounds = el.getBounds()
+                        val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
+                            .filter { wallBounds.contains(it.getBounds()) }
+                        
+                        val currentFloorIndex = floors.indexOf(floor)
+                        var wallTopReduction = 0.0
+                        if (currentFloorIndex < floors.size - 1) {
+                            val floorAbove = floors[currentFloorIndex + 1]
+                            val roomsAbove = floorAbove.doc.elements.filterIsInstance<Room>()
+                            for (roomAbove in roomsAbove) {
+                                val roomBounds = roomAbove.getBounds()
+                                if (roomBounds.contains(wallBounds)) {
+                                    wallTopReduction = roomAbove.floorThickness.toDouble()
+                                    break
+                                }
+                            }
+                        }
+                        val effectiveWallTop = currentZ + floorHeight - wallTopReduction
+                        
+                        val wallColor = Color(Color.DARK_GRAY.red, Color.DARK_GRAY.green, Color.DARK_GRAY.blue, floorAlpha)
+                        
+                        fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
+                            if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x1, y2, z1), color))
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z2), Vector3D(x2, y1, z2), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y1, z2), Vector3D(x1, y1, z2), color))
+                            model3d.rects.add(Rect3D(Vector3D(x1, y2, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
+                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x1, y2, z1), Vector3D(x1, y2, z2), Vector3D(x1, y1, z2), color))
+                            model3d.rects.add(Rect3D(Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x2, y1, z2), color))
+                        }
+
+                        if (openings.isEmpty()) {
+                            addBox(el.x.toDouble(), el.y.toDouble(), (el.x + el.width).toDouble(), (el.y + el.height).toDouble(), currentZ, effectiveWallTop, wallColor)
+                        } else {
+                            val isVertical = el.width < el.height
+                            if (isVertical) {
+                                val x1 = el.x.toDouble()
+                                val x2 = (el.x + el.width).toDouble()
+                                var lastY = el.y.toDouble()
+                                val sortedOpenings = openings.sortedBy { it.y }
+                                for (op in sortedOpenings) {
+                                    val opY1 = op.y.toDouble()
+                                    val opY2 = (op.y + op.height).toDouble()
+                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
+                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
+                                    
+                                    addBox(x1, lastY, x2, opY1, currentZ, effectiveWallTop, wallColor)
+                                    addBox(x1, opY1, x2, opY2, opZ2, effectiveWallTop, wallColor)
+                                    addBox(x1, opY1, x2, opY2, currentZ, opZ1, wallColor)
+                                    
+                                    lastY = opY2
+                                }
+                                addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, effectiveWallTop, wallColor)
+                            } else {
+                                val y1 = el.y.toDouble()
+                                val y2 = (el.y + el.height).toDouble()
+                                var lastX = el.x.toDouble()
+                                val sortedOpenings = openings.sortedBy { it.x }
+                                for (op in sortedOpenings) {
+                                    val opX1 = op.x.toDouble()
+                                    val opX2 = (op.x + op.width).toDouble()
+                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
+                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
+
+                                    addBox(lastX, y1, opX1, y2, currentZ, effectiveWallTop, wallColor)
+                                    addBox(opX1, y1, opX2, y2, opZ2, effectiveWallTop, wallColor)
+                                    addBox(opX1, y1, opX2, y2, currentZ, opZ1, wallColor)
+
+                                    lastX = opX2
+                                }
+                                addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, effectiveWallTop, wallColor)
+                            }
+                        }
+                    }
+                    is PlanWindow -> {
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val h3d = el.height3D.toDouble()
+                        val afh = el.sillElevation.toDouble()
+                        
+                        val wz1 = currentZ + afh
+                        val wz2 = wz1 + h3d
+
+                        val rooms = floor.doc.elements.filterIsInstance<Room>()
+                        val isVertical = el.width < el.height
+                        
+                        val windowColor = Color(0, 191, 255, 64)
+
+                        if (isVertical) {
+                            val centerX = (x1 + x2) / 2.0
+                            val centerY = (y1 + y2) / 2.0
+                            
+                            val hasRoomLeft = rooms.any { it.getBounds().contains(Point((centerX - 5).toInt(), centerY.toInt())) }
+                            val hasRoomRight = rooms.any { it.getBounds().contains(Point((centerX + 5).toInt(), centerY.toInt())) }
+                            
+                            if (!hasRoomLeft) {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                            } else if (!hasRoomRight) {
+                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
+                            } else {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
+                            }
+                        } else {
+                            val centerX = (x1 + x2) / 2.0
+                            val centerY = (y1 + y2) / 2.0
+                            
+                            val hasRoomTop = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY - 5).toInt())) }
+                            val hasRoomBottom = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY + 5).toInt())) }
+                            
+                            if (!hasRoomTop) {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                            } else if (!hasRoomBottom) {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
+                            } else {
+                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
+                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
+                            }
+                        }
+                    }
+                    is Door -> {
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        val doorZ1 = currentZ
+                        val doorZ2 = currentZ + el.verticalHeight.toDouble()
+                        
+                        model3d.doorInfos.add(model.DoorInfo(x1, y1, x2, y2, doorZ1, doorZ2))
+                    }
+                    is Stairs -> {
+                        val x1 = el.x.toDouble()
+                        val y1 = el.y.toDouble()
+                        val x2 = (el.x + el.width).toDouble()
+                        val y2 = (el.y + el.height).toDouble()
+                        
+                        val stepHeight = 17.0
+                        val totalRaise = el.totalRaise.toDouble()
+                        val numSteps = if (totalRaise == 0.0) 1 else kotlin.math.max(1, kotlin.math.abs(totalRaise / stepHeight).toInt())
+                        val actualStepHeight = if (totalRaise == 0.0) 0.0 else totalRaise / numSteps
+                        
+                        val isAlongX = el.directionAlongX
+                        val stairLength = if (isAlongX) (x2 - x1) else (y2 - y1)
+                        val actualStepDepth = stairLength / numSteps
+                        
+                        val baseZ = currentZ + el.zOffset.toDouble()
+                        
+                        model3d.stairInfos.add(model.StairInfo(x1, y1, x2, y2, baseZ, totalRaise, isAlongX))
+                        
+                        val stairColor = Color(139, 119, 101, floorAlpha)
+                        val slabColor = Color(160, 140, 120, floorAlpha)
+                        val slabThickness = 15.0
+                        
+                        for (step in 0 until numSteps) {
+                            val stepZ = baseZ + step * actualStepHeight
+                            val nextStepZ = baseZ + (step + 1) * actualStepHeight
+                            
+                            if (isAlongX) {
+                                val stepX1 = if (totalRaise >= 0) x1 + step * actualStepDepth else x2 - (step + 1) * actualStepDepth
+                                val stepX2 = if (totalRaise >= 0) x1 + (step + 1) * actualStepDepth else x2 - step * actualStepDepth
+                                
+                                model3d.rects.add(Rect3D(
+                                    Vector3D(stepX1, y1, nextStepZ), Vector3D(stepX2, y1, nextStepZ),
+                                    Vector3D(stepX2, y2, nextStepZ), Vector3D(stepX1, y2, nextStepZ),
+                                    stairColor
+                                ))
+                                
+                                if (totalRaise >= 0) {
+                                    model3d.rects.add(Rect3D(
+                                        Vector3D(stepX1, y1, stepZ), Vector3D(stepX1, y2, stepZ),
+                                        Vector3D(stepX1, y2, nextStepZ), Vector3D(stepX1, y1, nextStepZ),
+                                        stairColor
+                                    ))
+                                } else {
+                                    model3d.rects.add(Rect3D(
+                                        Vector3D(stepX2, y1, stepZ), Vector3D(stepX2, y2, stepZ),
+                                        Vector3D(stepX2, y2, nextStepZ), Vector3D(stepX2, y1, nextStepZ),
+                                        stairColor
+                                    ))
+                                }
+                                
+                                model3d.triangles.add(Triangle3D(Vector3D(stepX1, y1, stepZ), Vector3D(stepX2, y1, stepZ), Vector3D(stepX2, y1, nextStepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(stepX1, y1, stepZ), Vector3D(stepX2, y1, nextStepZ), Vector3D(stepX1, y1, nextStepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(stepX1, y2, stepZ), Vector3D(stepX2, y2, nextStepZ), Vector3D(stepX2, y2, stepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(stepX1, y2, stepZ), Vector3D(stepX1, y2, nextStepZ), Vector3D(stepX2, y2, nextStepZ), stairColor, isStairsVisualOnly = true))
+                            } else {
+                                val stepY1 = if (totalRaise >= 0) y1 + step * actualStepDepth else y2 - (step + 1) * actualStepDepth
+                                val stepY2 = if (totalRaise >= 0) y1 + (step + 1) * actualStepDepth else y2 - step * actualStepDepth
+                                
+                                model3d.rects.add(Rect3D(
+                                    Vector3D(x1, stepY1, nextStepZ), Vector3D(x2, stepY1, nextStepZ),
+                                    Vector3D(x2, stepY2, nextStepZ), Vector3D(x1, stepY2, nextStepZ),
+                                    stairColor
+                                ))
+                                
+                                if (totalRaise >= 0) {
+                                    model3d.rects.add(Rect3D(
+                                        Vector3D(x1, stepY1, stepZ), Vector3D(x2, stepY1, stepZ),
+                                        Vector3D(x2, stepY1, nextStepZ), Vector3D(x1, stepY1, nextStepZ),
+                                        stairColor
+                                    ))
+                                } else {
+                                    model3d.rects.add(Rect3D(
+                                        Vector3D(x1, stepY2, stepZ), Vector3D(x2, stepY2, stepZ),
+                                        Vector3D(x2, stepY2, nextStepZ), Vector3D(x1, stepY2, nextStepZ),
+                                        stairColor
+                                    ))
+                                }
+                                
+                                model3d.triangles.add(Triangle3D(Vector3D(x1, stepY1, stepZ), Vector3D(x1, stepY2, nextStepZ), Vector3D(x1, stepY2, stepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(x1, stepY1, stepZ), Vector3D(x1, stepY1, nextStepZ), Vector3D(x1, stepY2, nextStepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(x2, stepY1, stepZ), Vector3D(x2, stepY2, stepZ), Vector3D(x2, stepY2, nextStepZ), stairColor, isStairsVisualOnly = true))
+                                model3d.triangles.add(Triangle3D(Vector3D(x2, stepY1, stepZ), Vector3D(x2, stepY2, nextStepZ), Vector3D(x2, stepY1, nextStepZ), stairColor, isStairsVisualOnly = true))
+                            }
+                        }
+                        
+                        val endZ = baseZ + totalRaise
+                        val slabTopStartZ = baseZ
+                        val slabTopEndZ = endZ
+                        val slabBottomStartZ = baseZ - slabThickness
+                        val slabBottomEndZ = endZ - slabThickness
+                        
+                        if (isAlongX) {
+                            val slabStartX = if (totalRaise >= 0) x1 else x2
+                            val slabEndX = if (totalRaise >= 0) x2 else x1
+                            
+                            model3d.rects.add(Rect3D(Vector3D(slabStartX, y1, slabTopStartZ), Vector3D(slabEndX, y1, slabTopEndZ), Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabStartX, y2, slabTopStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y2, slabBottomStartZ), Vector3D(slabEndX, y2, slabBottomEndZ), Vector3D(slabEndX, y1, slabBottomEndZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabEndX, y1, slabBottomEndZ), Vector3D(slabEndX, y1, slabTopEndZ), Vector3D(slabStartX, y1, slabTopStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(slabStartX, y2, slabBottomStartZ), Vector3D(slabStartX, y2, slabTopStartZ), Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y2, slabBottomEndZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y1, slabTopStartZ), Vector3D(slabStartX, y2, slabTopStartZ), Vector3D(slabStartX, y2, slabBottomStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(slabEndX, y1, slabBottomEndZ), Vector3D(slabEndX, y2, slabBottomEndZ), Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y1, slabTopEndZ), slabColor, isStairsVisualOnly = true))
+                        } else {
+                            val slabStartY = if (totalRaise >= 0) y1 else y2
+                            val slabEndY = if (totalRaise >= 0) y2 else y1
+                            
+                            model3d.rects.add(Rect3D(Vector3D(x1, slabStartY, slabTopStartZ), Vector3D(x2, slabStartY, slabTopStartZ), Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabTopEndZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabEndY, slabBottomEndZ), Vector3D(x2, slabEndY, slabBottomEndZ), Vector3D(x2, slabStartY, slabBottomStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabStartY, slabTopStartZ), Vector3D(x1, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabBottomEndZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(x2, slabStartY, slabBottomStartZ), Vector3D(x2, slabEndY, slabBottomEndZ), Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabStartY, slabTopStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x2, slabStartY, slabBottomStartZ), Vector3D(x2, slabStartY, slabTopStartZ), Vector3D(x1, slabStartY, slabTopStartZ), slabColor, isStairsVisualOnly = true))
+                            model3d.rects.add(Rect3D(Vector3D(x1, slabEndY, slabBottomEndZ), Vector3D(x1, slabEndY, slabTopEndZ), Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabEndY, slabBottomEndZ), slabColor, isStairsVisualOnly = true))
+                        }
+                    }
+                }
+            }
+            currentZ += floorHeight
+        }
+        
+        return model3d
+    }
 
     internal fun repaintAllCanvases() {
         documents.forEach { it.canvas.repaint() }
@@ -1289,6 +1949,7 @@ class FloorPlanApp {
                 val floorNode = xmlDoc.createElement("Floor")
                 floorNode.setAttribute("path", floor.filePath)
                 floorNode.setAttribute("height", floor.height.toString())
+                floorNode.setAttribute("draw", floor.draw.toString())
                 rootElement.appendChild(floorNode)
             }
 
@@ -1504,7 +2165,8 @@ class FloorPlanApp {
                     val floorNode = floorNodes.item(i) as Element
                     val path = floorNode.getAttribute("path")
                     val height = floorNode.getAttribute("height").toInt()
-                    floorDataList.add(ThreeDDocument.FloorData(path, height))
+                    val draw = if (floorNode.hasAttribute("draw")) floorNode.getAttribute("draw").toBoolean() else true
+                    floorDataList.add(ThreeDDocument.FloorData(path, height, draw))
                     
                     val floorFile = File(path)
                     if (floorFile.exists()) {
