@@ -5,8 +5,10 @@ import javafx.embed.swing.JFXPanel
 import javafx.scene.*
 import javafx.scene.paint.Color as JFXColor
 import javafx.scene.paint.PhongMaterial
+import javafx.scene.shape.Box
 import javafx.scene.shape.CullFace
 import javafx.scene.shape.MeshView
+import javafx.scene.shape.Sphere
 import javafx.scene.shape.TriangleMesh
 import javafx.scene.transform.Rotate
 import javafx.scene.transform.Translate
@@ -28,7 +30,9 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     private var root: Group? = null
     private var modelGroup: Group? = null
     private var windowGroup: Group? = null  // Separate group for windows with always-on lighting
-    private var roomLightsGroup: Group? = null  // Group for room lights (visible in night mode only)
+    private var roomLightsGroup: Group? = null  // Group for room lights (point lights)
+    private var lightSpheresGroup: Group? = null  // Group for yellow spheres marking light positions (night mode only)
+    private var floorGridGroup: Group? = null  // Group for floor grid at Z=0
     private var camera: PerspectiveCamera? = null
     private var cameraXform: Group? = null
     private var cameraXRotate: Rotate? = null
@@ -97,10 +101,20 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         windowAmbientLight = wAmbient
         wGroup.children.add(wAmbient)
         
-        // Separate group for room lights (point lights + spheres) - visible only in night mode
+        // Separate group for room lights (point lights)
         val rlGroup = Group()
         roomLightsGroup = rlGroup
         rootGroup.children.add(rlGroup)
+        
+        // Separate group for yellow spheres marking light positions (night mode only)
+        val lsGroup = Group()
+        lightSpheresGroup = lsGroup
+        rootGroup.children.add(lsGroup)
+        
+        // Floor grid group
+        val fgGroup = Group()
+        floorGridGroup = fgGroup
+        rootGroup.children.add(fgGroup)
         
         val cam = PerspectiveCamera(true)
         camera = cam
@@ -173,12 +187,12 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             // Walk mode: mouse controls look direction
             // Moving mouse right (positive dx) should rotate view right (increase yaw)
             doc.playerYaw += dx * 0.3
-            doc.playerPitch = (doc.playerPitch - dy * 0.3).coerceIn(-89.0, 89.0)
+            doc.playerPitch = (doc.playerPitch + dy * 0.3).coerceIn(-89.0, 89.0)
             updateCamera()
         } else {
             // Orbit mode: mouse controls orbit rotation
             doc.rotationZ -= dx * 0.5
-            doc.rotationX = (doc.rotationX + dy * 0.5).coerceIn(0.0, 90.0)
+            doc.rotationX = (doc.rotationX - dy * 0.5).coerceIn(0.0, 90.0)
             updateCamera()
         }
     }
@@ -457,14 +471,11 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     }
 
     fun updateModel() {
-        val regularMeshViews = doc.model.rects.filter { !it.isWindow }.map { rect ->
+        val regularMeshViews = doc.model.rects.map { rect ->
             createRectMeshView(rect)
         }
         val triangleMeshViews = doc.model.triangles.map { tri ->
             createTriangleMeshView(tri)
-        }
-        val windowMeshViews = doc.model.rects.filter { it.isWindow }.map { rect ->
-            createRectMeshView(rect)
         }
         
         Platform.runLater {
@@ -472,14 +483,20 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             modelGroup?.children?.addAll(regularMeshViews)
             modelGroup?.children?.addAll(triangleMeshViews)
             
-            // Keep the window ambient light, clear only meshes, then re-add windows
+            // Clear windows
             windowGroup?.children?.removeIf { it !is AmbientLight }
+            
+            // Add window frames to windowGroup
+            val windowMeshViews = doc.model.rects.filter { it.isWindow }.map { rect ->
+                createRectMeshView(rect)
+            }
             windowGroup?.children?.addAll(windowMeshViews)
             
             // Clear and rebuild room lights group
             roomLightsGroup?.children?.clear()
+            lightSpheresGroup?.children?.clear()
             
-            // Add point lights at room centers (no visual spheres)
+            // Add point lights at room centers and yellow spheres for night mode
             doc.model.lightPositions.forEach { pos ->
                 // Mapping: Model(x, y, z) -> FX(-x, -z, y) with X mirrored
                 val fxX = -pos.x
@@ -493,10 +510,59 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
                 light.translateZ = fxZ
                 light.maxRange = Double.MAX_VALUE
                 roomLightsGroup?.children?.add(light)
+                
+                // Yellow sphere to mark light position (visible in night mode)
+                val sphere = Sphere(10.0)
+                val yellowMaterial = PhongMaterial(JFXColor.YELLOW)
+                yellowMaterial.specularColor = JFXColor.WHITE
+                sphere.material = yellowMaterial
+                sphere.translateX = fxX
+                sphere.translateY = fxY
+                sphere.translateZ = fxZ
+                lightSpheresGroup?.children?.add(sphere)
+            }
+            
+            // Create floor grid at Z=0 (in absolute model coordinates, not centered)
+            floorGridGroup?.children?.clear()
+            val bounds = doc.model.getBounds()
+            val gridMaterial = PhongMaterial(JFXColor.rgb(100, 100, 100, 0.5))
+            val gridSpacing = 100.0  // 100cm grid spacing
+            val gridExtent = 2000.0  // Extend grid beyond model bounds
+            val minX = bounds.first.x - gridExtent
+            val maxX = bounds.second.x + gridExtent
+            val minY = bounds.first.y - gridExtent
+            val maxY = bounds.second.y + gridExtent
+            val gridZ = 0.0  // Z=0 in model coordinates (0th floor level)
+            
+            // Create grid lines along X axis (use absolute coordinates, then apply centering)
+            val center = doc.model.getCenter()
+            var y = (minY / gridSpacing).toInt() * gridSpacing
+            while (y <= maxY) {
+                val line = Box(maxX - minX, 1.0, 1.0)
+                line.material = gridMaterial
+                // FX coordinates: (-x, -z, y) with centering applied
+                line.translateX = -(minX + maxX) / 2.0 + center.x
+                line.translateY = -gridZ + center.z
+                line.translateZ = y - center.y
+                floorGridGroup?.children?.add(line)
+                y += gridSpacing
+            }
+            
+            // Create grid lines along Y axis
+            var x = (minX / gridSpacing).toInt() * gridSpacing
+            while (x <= maxX) {
+                val line = Box(1.0, 1.0, maxY - minY)
+                line.material = gridMaterial
+                // FX coordinates: (-x, -z, y) with centering applied
+                line.translateX = -x + center.x
+                line.translateY = -gridZ + center.z
+                line.translateZ = (minY + maxY) / 2.0 - center.y
+                floorGridGroup?.children?.add(line)
+                x += gridSpacing
             }
             
             // Center the model group (X is mirrored, so use positive center.x)
-            val center = doc.model.getCenter()
+            // Note: 'center' already declared above for grid positioning
             modelGroup?.translateX = center.x
             modelGroup?.translateY = center.z // FX Y is -Model Z
             modelGroup?.translateZ = -center.y // FX Z is Model Y
@@ -511,8 +577,30 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             roomLightsGroup?.translateY = center.z
             roomLightsGroup?.translateZ = -center.y
             
+            // Apply same centering to light spheres group so spheres align with the model
+            lightSpheresGroup?.translateX = center.x
+            lightSpheresGroup?.translateY = center.z
+            lightSpheresGroup?.translateZ = -center.y
+            
             // Re-calculate camera distance to fit model
             updateCamera()
+            updateLighting()
+        }
+    }
+    
+    fun updateLighting() {
+        Platform.runLater {
+            if (doc.isDayMode) {
+                // Day mode: ambient light on, room lights off, no spheres
+                ambientLight?.color = JFXColor.WHITE
+                roomLightsGroup?.isVisible = false
+                lightSpheresGroup?.isVisible = false
+            } else {
+                // Night mode: dim ambient, room lights on, show yellow spheres
+                ambientLight?.color = JFXColor.rgb(30, 30, 40)  // Very dim ambient
+                roomLightsGroup?.isVisible = true
+                lightSpheresGroup?.isVisible = true
+            }
         }
     }
     

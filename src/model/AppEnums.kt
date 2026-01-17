@@ -7,3 +7,7 @@ enum class AppMode {
 enum class ResizeHandle {
     NONE, N, S, E, W, NW, NE, SW, SE
 }
+
+enum class WindowPosition {
+    XY, X2Y2
+}

@@ -9,6 +9,7 @@ class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
     private lateinit var zoomInBtn: JButton
     private lateinit var zoomOutBtn: JButton
     private lateinit var walkModeBtn: JToggleButton
+    private lateinit var dayModeCheckbox: JCheckBox
     private lateinit var controlsLabel: JLabel
     
     init {
@@ -28,6 +29,7 @@ class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
             override fun windowActivated(e: java.awt.event.WindowEvent?) {
                 app.activeWindow = this@ThreeDWindow
                 app.activeDocument = null
+                app.sidePanel.updateThreeDFields(doc)
                 app.updateUndoRedoStates()
             }
         })
@@ -82,6 +84,17 @@ class ThreeDWindow(val app: FloorPlanApp, val doc: ThreeDDocument) : JFrame() {
             }
         }
         toolBar.add(walkModeBtn)
+        
+        toolBar.addSeparator()
+        
+        // Day mode checkbox
+        dayModeCheckbox = JCheckBox("Day mode", doc.isDayMode)
+        dayModeCheckbox.toolTipText = "Toggle between day (lit from all sides) and night (room lights only) mode"
+        dayModeCheckbox.addActionListener {
+            doc.isDayMode = dayModeCheckbox.isSelected
+            doc.panel.updateLighting()
+        }
+        toolBar.add(dayModeCheckbox)
         
         toolBar.addSeparator()
         

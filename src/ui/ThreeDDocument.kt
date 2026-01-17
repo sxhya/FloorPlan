@@ -49,6 +49,9 @@ class ThreeDDocument(val app: FloorPlanApp) {
     val jumpImpulse = 30.0      // Initial upward velocity when jumping in cm per frame
     var isOnGround = true       // Whether player is standing on ground
     
+    // Lighting mode
+    var isDayMode = true        // True = lit from all sides, False = lit only from room light sources
+    
     val panel = ThreeDPanel(this)
     
     // Initialize player position at the center of a room

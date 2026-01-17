@@ -300,7 +300,7 @@ class FloorPlanDocument(val app: FloorPlanApp) {
             val newEl = when (el) {
                 is Wall -> Wall(el.x, el.y, el.width, el.height)
                 is Room -> Room(el.x, el.y, el.width, el.height, el.floorThickness, el.zOffset)
-                is Window -> Window(el.x, el.y, el.width, el.height, el.height3D, el.sillElevation)
+                is Window -> Window(el.x, el.y, el.width, el.height, el.height3D, el.sillElevation, el.windowPosition)
                 is Door -> Door(el.x, el.y, el.width, el.height, el.verticalHeight)
                 is Stairs -> Stairs(el.x, el.y, el.width, el.height, el.directionAlongX, el.totalRaise, el.zOffset)
                 is PolygonRoom -> PolygonRoom(el.vertices.map { Point(it.x, it.y) }.toMutableList(), el.floorThickness, el.zOffset)

@@ -3,12 +3,29 @@ package ui.components
 import model.*
 import model.Window as PlanWindow
 import ui.FloorPlanApp
+import ui.ThreeDDocument
 import java.awt.*
+import java.util.EventObject
 import javax.swing.*
 import javax.swing.table.DefaultTableModel
+import javax.swing.table.TableCellEditor
+import javax.swing.table.TableCellRenderer
 import kotlin.math.roundToInt
 
 class SidePanel(private val app: FloorPlanApp) : JPanel() {
+    private inner class PropertyTable(model: DefaultTableModel) : JTable(model) {
+        init {
+            putClientProperty("terminateEditOnFocusLost", true)
+        }
+
+        override fun tableChanged(e: javax.swing.event.TableModelEvent?) {
+            if (isEditing) {
+                cellEditor?.stopCellEditing()
+            }
+            super.tableChanged(e)
+        }
+    }
+
     private val mainFieldsPanel = JPanel(BorderLayout())
     private val dimensionTableModel = object : DefaultTableModel(arrayOf("Property", "Value"), 0) {
         override fun isCellEditable(row: Int, column: Int): Boolean {
@@ -20,11 +37,27 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
         }
     }
-    private val dimensionTable = JTable(dimensionTableModel)
+    private val dimensionTable = PropertyTable(dimensionTableModel)
 
     private val polygonPanel = JPanel(BorderLayout())
     private val polygonTableModel = DefaultTableModel(arrayOf("Marker No", "X", "Y"), 0)
-    private val polygonTable = JTable(polygonTableModel)
+    private val polygonTable = PropertyTable(polygonTableModel)
+
+    private val threeDSidePanel = JPanel(BorderLayout())
+    private val threeDTableModel = object : DefaultTableModel(arrayOf("Floor Plan", "Height (cm)", "Draw"), 0) {
+        override fun isCellEditable(row: Int, column: Int): Boolean = true
+        
+        override fun getColumnClass(columnIndex: Int): Class<*> {
+            return when (columnIndex) {
+                0 -> String::class.java
+                1 -> Int::class.javaObjectType
+                2 -> Boolean::class.javaObjectType
+                else -> Any::class.java
+            }
+        }
+    }
+    private val threeDTable = PropertyTable(threeDTableModel)
+    private var currentThreeDDoc: ThreeDDocument? = null
 
     private var isUpdatingFields = false
 
@@ -38,6 +71,21 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
         polygonPanel.add(JLabel("Polygon Vertices"), BorderLayout.NORTH)
         polygonPanel.add(JScrollPane(polygonTable), BorderLayout.CENTER)
+
+        // Setup 3D panel
+        threeDSidePanel.add(JLabel("3D Model Floors"), BorderLayout.NORTH)
+        threeDTable.rowHeight = 25
+        threeDTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        setupFloorPlanComboBox()
+        threeDTable.columnModel.getColumn(2).cellRenderer = threeDTable.getDefaultRenderer(Boolean::class.javaObjectType)
+        threeDTable.columnModel.getColumn(2).cellEditor = threeDTable.getDefaultEditor(Boolean::class.javaObjectType)
+        
+        threeDTableModel.addTableModelListener { e ->
+            if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
+                applyThreeDChanges(e.firstRow, e.column)
+            }
+        }
+        threeDSidePanel.add(JScrollPane(threeDTable), BorderLayout.CENTER)
 
         val polygonPopup = JPopupMenu()
         val duplicateMarkerItem = JMenuItem("Duplicate Marker")
@@ -79,6 +127,8 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
         polygonTable.componentPopupMenu = polygonPopup
         
+        setupDimensionTableEditors()
+
         dimensionTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
                 val row = e.firstRow
@@ -158,8 +208,8 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun updateFields(el: PlanElement) {
+        clearFields()
         isUpdatingFields = true
-        dimensionTableModel.setRowCount(0)
         dimensionTableModel.addRow(arrayOf("Type", el.javaClass.simpleName))
         dimensionTableModel.addRow(arrayOf("X", el.x))
         dimensionTableModel.addRow(arrayOf("Y", el.y))
@@ -170,6 +220,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             dimensionTableModel.addRow(arrayOf("Vertical height", h3d))
             if (el is PlanWindow) {
                 dimensionTableModel.addRow(arrayOf("Sill elevation", el.sillElevation))
+                dimensionTableModel.addRow(arrayOf("Window Position", el.windowPosition))
             }
         }
         if (el is Room) {
@@ -214,10 +265,8 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             el.vertices.forEachIndexed { index, point ->
                 polygonTableModel.addRow(arrayOf(index + 1, point.x, point.y))
             }
-            remove(mainFieldsPanel)
             add(polygonPanel, BorderLayout.CENTER)
         } else {
-            remove(polygonPanel)
             add(mainFieldsPanel, BorderLayout.CENTER)
         }
         
@@ -226,10 +275,209 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         isUpdatingFields = false
     }
 
+    private fun setupDimensionTableEditors() {
+        val windowPositionComboBox = JComboBox(WindowPosition.values())
+        windowPositionComboBox.addActionListener {
+            if (dimensionTable.isEditing) {
+                val row = dimensionTable.editingRow
+                if (row != -1 && dimensionTable.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim() == "Window Position") {
+                    dimensionTable.setValueAt(windowPositionComboBox.selectedItem, row, 1)
+                }
+                dimensionTable.cellEditor?.stopCellEditing()
+            }
+        }
+        val windowPositionEditor = DefaultCellEditor(windowPositionComboBox)
+
+        val directionComboBox = JComboBox(arrayOf(true, false))
+        directionComboBox.addActionListener {
+            if (dimensionTable.isEditing) {
+                val row = dimensionTable.editingRow
+                if (row != -1 && dimensionTable.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim() == "Direction along X") {
+                    dimensionTable.setValueAt(directionComboBox.selectedItem, row, 1)
+                }
+                dimensionTable.cellEditor?.stopCellEditing()
+            }
+        }
+        val directionRenderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(list: JList<*>?, value: Any?, index: Int, isSelected: Boolean, cellHasFocus: Boolean): Component {
+                val text = if (value == true) "Along X" else if (value == false) "Along Y" else value?.toString() ?: ""
+                return super.getListCellRendererComponent(list, text, index, isSelected, cellHasFocus)
+            }
+        }
+        directionComboBox.renderer = directionRenderer
+        val directionEditor = DefaultCellEditor(directionComboBox)
+
+        val defaultEditor = DefaultCellEditor(JTextField())
+
+        dimensionTable.columnModel.getColumn(1).cellEditor = object : AbstractCellEditor(), TableCellEditor {
+            private var currentEditor: TableCellEditor? = null
+
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                val propName = table?.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
+                currentEditor = when (propName) {
+                    "Window Position" -> windowPositionEditor
+                    "Direction along X" -> directionEditor
+                    else -> defaultEditor
+                }
+                return currentEditor!!.getTableCellEditorComponent(table, value, isSelected, row, column)
+            }
+
+            override fun getCellEditorValue(): Any? {
+                return currentEditor?.cellEditorValue
+            }
+
+            override fun isCellEditable(e: EventObject?): Boolean {
+                return true
+            }
+
+            override fun shouldSelectCell(anEvent: EventObject?): Boolean {
+                return true
+            }
+
+            override fun stopCellEditing(): Boolean {
+                return currentEditor?.stopCellEditing() ?: true
+            }
+
+            override fun cancelCellEditing() {
+                currentEditor?.cancelCellEditing()
+            }
+        }
+
+        dimensionTable.columnModel.getColumn(1).cellRenderer = object : TableCellRenderer {
+            private val defaultRenderer = dimensionTable.getDefaultRenderer(Any::class.java)
+            override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
+                val propName = table?.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
+                
+                if (propName == "Direction along X" || propName == "Window Position") {
+                    val comboBox = if (propName == "Direction along X") directionComboBox else windowPositionComboBox
+                    
+                    comboBox.selectedItem = value
+                    
+                    if (isSelected) {
+                        comboBox.background = table?.selectionBackground
+                        comboBox.foreground = table?.selectionForeground
+                    } else {
+                        comboBox.background = table?.background
+                        comboBox.foreground = table?.foreground
+                    }
+                    comboBox.font = table?.font
+                    return comboBox
+                }
+                
+                return defaultRenderer.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            }
+        }
+    }
+
+    private fun setupFloorPlanComboBox() {
+        val comboBox = JComboBox<String>()
+        comboBox.addActionListener {
+            if (threeDTable.isEditing) {
+                threeDTable.cellEditor?.stopCellEditing()
+            }
+        }
+        val editor = object : DefaultCellEditor(comboBox) {
+            override fun getTableCellEditorComponent(
+                table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int
+            ): Component {
+                comboBox.removeAllItems()
+                app.getOpenDocuments().forEach { doc ->
+                    val name = doc.currentFile?.absolutePath ?: "Untitled"
+                    comboBox.addItem(name)
+                }
+                val currentValue = value?.toString() ?: ""
+                if (currentValue.isNotEmpty() && (0 until comboBox.itemCount).none { comboBox.getItemAt(it) == currentValue }) {
+                    comboBox.addItem(currentValue)
+                }
+                comboBox.selectedItem = value
+                return super.getTableCellEditorComponent(table, value, isSelected, row, column)
+            }
+
+            override fun stopCellEditing(): Boolean {
+                val row = threeDTable.editingRow
+                if (row != -1) {
+                    threeDTable.setValueAt(comboBox.selectedItem, row, 0)
+                }
+                return super.stopCellEditing()
+            }
+        }
+        threeDTable.columnModel.getColumn(0).cellEditor = editor
+        threeDTable.columnModel.getColumn(0).preferredWidth = 150
+        threeDTable.columnModel.getColumn(1).preferredWidth = 80
+        threeDTable.columnModel.getColumn(2).preferredWidth = 50
+    }
+
+    fun updateThreeDFields(doc: ThreeDDocument) {
+        clearFields()
+        isUpdatingFields = true
+        currentThreeDDoc = doc
+        for (floor in doc.floors) {
+            threeDTableModel.addRow(arrayOf(floor.filePath, floor.height, floor.draw))
+        }
+        add(threeDSidePanel, BorderLayout.CENTER)
+        revalidate()
+        repaint()
+        isUpdatingFields = false
+    }
+
+    private fun applyThreeDChanges(row: Int, column: Int) {
+        val doc = currentThreeDDoc ?: return
+        if (row < 0 || row >= doc.floors.size) return
+        val floor = doc.floors[row]
+        when (column) {
+            0 -> {
+                val newPath = threeDTableModel.getValueAt(row, 0)?.toString() ?: return
+                if (newPath != floor.filePath) {
+                    doc.floors[row] = ThreeDDocument.FloorData(newPath, floor.height, floor.draw)
+                    doc.isModified = true
+                    app.regenerate3DModelFromFloors(doc)
+                }
+            }
+            1 -> {
+                val newHeight = (threeDTableModel.getValueAt(row, 1) as? Int) ?: return
+                if (newHeight != floor.height) {
+                    floor.height = newHeight
+                    doc.isModified = true
+                    app.regenerate3DModelFromFloors(doc)
+                }
+            }
+            2 -> {
+                val newDraw = (threeDTableModel.getValueAt(row, 2) as? Boolean) ?: return
+                if (newDraw != floor.draw) {
+                    floor.draw = newDraw
+                    doc.isModified = true
+                    app.regenerate3DModelFromFloors(doc)
+                }
+            }
+        }
+        doc.window?.title = "3D House Model - ${doc.currentFile?.name ?: "Untitled"}*"
+    }
+
     fun clearFields() {
         isUpdatingFields = true
+        if (dimensionTable.isEditing) {
+            dimensionTable.cellEditor?.stopCellEditing()
+            dimensionTable.removeEditor()
+        }
+        if (polygonTable.isEditing) {
+            polygonTable.cellEditor?.stopCellEditing()
+            polygonTable.removeEditor()
+        }
+        if (threeDTable.isEditing) {
+            threeDTable.cellEditor?.stopCellEditing()
+            threeDTable.removeEditor()
+        }
         dimensionTableModel.setRowCount(0)
         polygonTableModel.setRowCount(0)
+        threeDTableModel.setRowCount(0)
+        currentThreeDDoc = null
+        
+        remove(mainFieldsPanel)
+        remove(polygonPanel)
+        remove(threeDSidePanel)
+        
+        revalidate()
+        repaint()
         isUpdatingFields = false
     }
 
@@ -240,17 +488,29 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         var newVal: Int? = null
         var doubleVal: Double? = null
         var boolVal: Boolean? = null
+        var posVal: WindowPosition? = null
         
         for (i in 0 until dimensionTableModel.rowCount) {
-            if (dimensionTableModel.getValueAt(i, 0).toString().replace(":", "").trim() == source) {
-                newVal = dimensionTableModel.getValueAt(i, 1).toString().toIntOrNull()
-                doubleVal = dimensionTableModel.getValueAt(i, 1).toString().toDoubleOrNull()
-                boolVal = dimensionTableModel.getValueAt(i, 1).toString().toBooleanStrictOrNull()
+            val propName = dimensionTableModel.getValueAt(i, 0).toString().replace(":", "").trim()
+            if (propName == source) {
+                val value = dimensionTableModel.getValueAt(i, 1) ?: return
+                
+                if (value is WindowPosition) {
+                    posVal = value
+                } else if (value is Boolean) {
+                    boolVal = value
+                } else {
+                    val valueStr = value.toString()
+                    newVal = valueStr.toIntOrNull()
+                    doubleVal = valueStr.toDoubleOrNull()
+                    boolVal = boolVal ?: valueStr.toBooleanStrictOrNull()
+                    posVal = posVal ?: try { WindowPosition.valueOf(valueStr) } catch (e: Exception) { null }
+                }
                 break
             }
         }
 
-        if (newVal == null && doubleVal == null && boolVal == null) return
+        if (newVal == null && doubleVal == null && boolVal == null && posVal == null) return
 
         val isChanged = when (source) {
             "X" -> el.x != newVal
@@ -280,6 +540,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Total raise" -> {
                 if (el is Stairs) el.totalRaise != doubleVal?.toInt() else false
+            }
+            "Window Position" -> {
+                if (el is PlanWindow) el.windowPosition != posVal else false
             }
             else -> false
         }
@@ -313,6 +576,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Total raise" -> {
                 if (el is Stairs) el.totalRaise = doubleVal!!.toInt()
+            }
+            "Window Position" -> {
+                if (el is PlanWindow) el.windowPosition = posVal!!
             }
         }
         

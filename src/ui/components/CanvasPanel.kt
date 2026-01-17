@@ -203,6 +203,9 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                         return
                     }
 
+                    // Stop any active editing and commit values to the CURRENT element before changing selection
+                    doc.app.sidePanel.clearFields()
+                    
                     doc.selectedElement = doc.elements.reversed().find { 
                         it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                     }
@@ -1435,7 +1438,33 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             when (el.type) {
                 ElementType.WALL -> g2.color = Color.DARK_GRAY
                 ElementType.ROOM -> g2.color = Color.LIGHT_GRAY
-                ElementType.WINDOW -> g2.color = Color.CYAN
+                ElementType.WINDOW -> {
+                    val win = el as PlanWindow
+                    val isVertical = el.width < el.height
+                    
+                    g2.color = Color.WHITE
+                    g2.fillRect(sx, sy, sw, sh)
+                    g2.color = Color.LIGHT_GRAY
+                    g2.drawRect(sx, sy, sw, sh)
+
+                    g2.color = Color.BLUE
+                    g2.stroke = BasicStroke(4f)
+                    if (isVertical) {
+                        if (win.windowPosition == WindowPosition.X2Y2) {
+                            g2.drawLine(sx + sw, sy, sx + sw, sy + sh)
+                        } else {
+                            g2.drawLine(sx, sy, sx, sy + sh)
+                        }
+                    } else {
+                        if (win.windowPosition == WindowPosition.X2Y2) {
+                            g2.drawLine(sx, sy + sh, sx + sw, sy + sh)
+                        } else {
+                            g2.drawLine(sx, sy, sx + sw, sy)
+                        }
+                    }
+                    g2.stroke = BasicStroke(1f)
+                    return
+                }
                 ElementType.DOOR -> g2.color = Color.ORANGE
                 ElementType.POLYGON_ROOM -> {
                     g2.color = Color(230, 230, 230) // Light gray for polygon room

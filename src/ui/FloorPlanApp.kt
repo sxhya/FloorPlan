@@ -13,7 +13,6 @@ import model.PolygonRoom
 import javafx.application.Platform
 import ui.components.SidePanel
 import ui.components.StatisticsPanel
-import ui.components.ThreeDSidePanel
 import java.awt.*
 import java.awt.image.BufferedImage
 import java.io.File
@@ -35,7 +34,6 @@ class FloorPlanApp {
     
     internal val sidePanel = SidePanel(this)
     internal val statsPanel = StatisticsPanel(this)
-    internal val threeDSidePanel = ThreeDSidePanel(this)
     
     private var sidePanelWindow: SidePanelWindow? = null
     
@@ -883,6 +881,25 @@ class FloorPlanApp {
                                     // Part below opening
                                     addBox(x1, opY1, x2, opY2, currentZ, opZ1, Color.DARK_GRAY)
                                     
+                                    // Generate window frame for windows
+                                    if (op is PlanWindow) {
+                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowPos = op.windowPosition
+                                        
+                                        // Determine which edge to place the window frame based on WindowPosition
+                                        val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
+                                        
+                                        // Create window frame as a thin rectangle (cylinder over the edge line)
+                                        model3d.rects.add(Rect3D(
+                                            Vector3D(frameX, opY1, opZ1),
+                                            Vector3D(frameX, opY2, opZ1),
+                                            Vector3D(frameX, opY2, opZ2),
+                                            Vector3D(frameX, opY1, opZ2),
+                                            windowColor,
+                                            isWindow = true
+                                        ))
+                                    }
+                                    
                                     lastY = opY2
                                 }
                                 // Part after last opening
@@ -906,6 +923,25 @@ class FloorPlanApp {
                                     // Part below opening
                                     addBox(opX1, y1, opX2, y2, currentZ, opZ1, Color.DARK_GRAY)
 
+                                    // Generate window frame for windows
+                                    if (op is PlanWindow) {
+                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowPos = op.windowPosition
+                                        
+                                        // Determine which edge to place the window frame based on WindowPosition
+                                        val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
+                                        
+                                        // Create window frame as a thin rectangle (cylinder over the edge line)
+                                        model3d.rects.add(Rect3D(
+                                            Vector3D(opX1, frameY, opZ1),
+                                            Vector3D(opX2, frameY, opZ1),
+                                            Vector3D(opX2, frameY, opZ2),
+                                            Vector3D(opX1, frameY, opZ2),
+                                            windowColor,
+                                            isWindow = true
+                                        ))
+                                    }
+
                                     lastX = opX2
                                 }
                                 // Part after last opening
@@ -914,62 +950,40 @@ class FloorPlanApp {
                         }
                     }
                     is PlanWindow -> {
+                        // Free-standing window - generate window frame
+                        val isVertical = el.width < el.height
+                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                        val windowPos = el.windowPosition
+                        
                         val x1 = el.x.toDouble()
                         val y1 = el.y.toDouble()
                         val x2 = (el.x + el.width).toDouble()
                         val y2 = (el.y + el.height).toDouble()
-                        val h3d = el.height3D.toDouble()
-                        val afh = el.sillElevation.toDouble()
+                        val opZ1 = currentZ + el.sillElevation.toDouble()
+                        val opZ2 = opZ1 + el.height3D.toDouble()
                         
-                        val wz1 = currentZ + afh
-                        val wz2 = wz1 + h3d
-
-                        val rooms = floor.doc.elements.filterIsInstance<Room>()
-                        val isVertical = el.width < el.height
-                        
-                        // Semi-transparent blue (lower alpha = more transparent)
-                        val windowColor = Color(0, 191, 255, 64)
-
                         if (isVertical) {
-                            // Wall is along Y axis, so outer side is either X-epsilon or X+width+epsilon
-                            val centerX = (x1 + x2) / 2.0
-                            val centerY = (y1 + y2) / 2.0
-                            
-                            val hasRoomLeft = rooms.any { it.getBounds().contains(Point((centerX - 5).toInt(), centerY.toInt())) }
-                            val hasRoomRight = rooms.any { it.getBounds().contains(Point((centerX + 5).toInt(), centerY.toInt())) }
-                            
-                            if (!hasRoomLeft) {
-                                // Left side is outer
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                            } else if (!hasRoomRight) {
-                                // Right side is outer
-                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
-                            } else {
-                                // Both sides have rooms, or neither? If both, just pick one or draw both?
-                                // "Outer is where is no room docked."
-                                // If it's an internal window, maybe it shouldn't be drawn or drawn on both sides.
-                                // Let's draw on both if both are "outer" (shouldn't happen for a wall between rooms if we use 5 pixels)
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
-                            }
+                            // Vertical window - frame on left or right edge
+                            val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(frameX, y1, opZ1),
+                                Vector3D(frameX, y2, opZ1),
+                                Vector3D(frameX, y2, opZ2),
+                                Vector3D(frameX, y1, opZ2),
+                                windowColor,
+                                isWindow = true
+                            ))
                         } else {
-                            // Wall is along X axis, so outer side is either Y-epsilon or Y+height+epsilon
-                            val centerX = (x1 + x2) / 2.0
-                            val centerY = (y1 + y2) / 2.0
-                            
-                            val hasRoomTop = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY - 5).toInt())) }
-                            val hasRoomBottom = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY + 5).toInt())) }
-                            
-                            if (!hasRoomTop) {
-                                // Top side is outer
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                            } else if (!hasRoomBottom) {
-                                // Bottom side is outer
-                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
-                            } else {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
-                            }
+                            // Horizontal window - frame on top or bottom edge
+                            val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, frameY, opZ1),
+                                Vector3D(x2, frameY, opZ1),
+                                Vector3D(x2, frameY, opZ2),
+                                Vector3D(x1, frameY, opZ2),
+                                windowColor,
+                                isWindow = true
+                            ))
                         }
                     }
                     is Door -> {
@@ -1521,7 +1535,12 @@ class FloorPlanApp {
             // Check if this floor should be drawn (get draw flag from doc3d.floors)
             val floorData = doc3d.floors.getOrNull(floorIndex)
             val shouldDraw = floorData?.draw ?: true
-            val floorAlpha = if (shouldDraw) 255 else 51  // 80% transparency = 20% opacity = 51/255
+            if (!shouldDraw) {
+                currentZ += floorHeight
+                continue
+            }
+            val wallColor = Color.DARK_GRAY
+            val floorAlpha = 255
 
             for (el in floor.doc.elements) {
                 when (el) {
@@ -1660,8 +1679,6 @@ class FloorPlanApp {
                         }
                         val effectiveWallTop = currentZ + floorHeight - wallTopReduction
                         
-                        val wallColor = Color(Color.DARK_GRAY.red, Color.DARK_GRAY.green, Color.DARK_GRAY.blue, floorAlpha)
-                        
                         fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
                             if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
                             model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x1, y2, z1), color))
@@ -1690,7 +1707,26 @@ class FloorPlanApp {
                                     addBox(x1, lastY, x2, opY1, currentZ, effectiveWallTop, wallColor)
                                     addBox(x1, opY1, x2, opY2, opZ2, effectiveWallTop, wallColor)
                                     addBox(x1, opY1, x2, opY2, currentZ, opZ1, wallColor)
-                                    
+
+                                    // Generate window frame for windows
+                                    if (op is PlanWindow) {
+                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowPos = op.windowPosition
+                                        
+                                        // Determine which edge to place the window frame based on WindowPosition
+                                        val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
+                                        
+                                        // Create window frame as a thin rectangle (cylinder over the edge line)
+                                        model3d.rects.add(Rect3D(
+                                            Vector3D(frameX, opY1, opZ1),
+                                            Vector3D(frameX, opY2, opZ1),
+                                            Vector3D(frameX, opY2, opZ2),
+                                            Vector3D(frameX, opY1, opZ2),
+                                            windowColor,
+                                            isWindow = true
+                                        ))
+                                    }
+
                                     lastY = opY2
                                 }
                                 addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, effectiveWallTop, wallColor)
@@ -1709,6 +1745,25 @@ class FloorPlanApp {
                                     addBox(opX1, y1, opX2, y2, opZ2, effectiveWallTop, wallColor)
                                     addBox(opX1, y1, opX2, y2, currentZ, opZ1, wallColor)
 
+                                    // Generate window frame for windows
+                                    if (op is PlanWindow) {
+                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowPos = op.windowPosition
+                                        
+                                        // Determine which edge to place the window frame based on WindowPosition
+                                        val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
+                                        
+                                        // Create window frame as a thin rectangle (cylinder over the edge line)
+                                        model3d.rects.add(Rect3D(
+                                            Vector3D(opX1, frameY, opZ1),
+                                            Vector3D(opX2, frameY, opZ1),
+                                            Vector3D(opX2, frameY, opZ2),
+                                            Vector3D(opX1, frameY, opZ2),
+                                            windowColor,
+                                            isWindow = true
+                                        ))
+                                    }
+
                                     lastX = opX2
                                 }
                                 addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, effectiveWallTop, wallColor)
@@ -1716,51 +1771,40 @@ class FloorPlanApp {
                         }
                     }
                     is PlanWindow -> {
+                        // Free-standing window - generate window frame
+                        val isVertical = el.width < el.height
+                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                        val windowPos = el.windowPosition
+                        
                         val x1 = el.x.toDouble()
                         val y1 = el.y.toDouble()
                         val x2 = (el.x + el.width).toDouble()
                         val y2 = (el.y + el.height).toDouble()
-                        val h3d = el.height3D.toDouble()
-                        val afh = el.sillElevation.toDouble()
+                        val opZ1 = currentZ + el.sillElevation.toDouble()
+                        val opZ2 = opZ1 + el.height3D.toDouble()
                         
-                        val wz1 = currentZ + afh
-                        val wz2 = wz1 + h3d
-
-                        val rooms = floor.doc.elements.filterIsInstance<Room>()
-                        val isVertical = el.width < el.height
-                        
-                        val windowColor = Color(0, 191, 255, 64)
-
                         if (isVertical) {
-                            val centerX = (x1 + x2) / 2.0
-                            val centerY = (y1 + y2) / 2.0
-                            
-                            val hasRoomLeft = rooms.any { it.getBounds().contains(Point((centerX - 5).toInt(), centerY.toInt())) }
-                            val hasRoomRight = rooms.any { it.getBounds().contains(Point((centerX + 5).toInt(), centerY.toInt())) }
-                            
-                            if (!hasRoomLeft) {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                            } else if (!hasRoomRight) {
-                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
-                            } else {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x1, y2, wz1), Vector3D(x1, y2, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                                model3d.rects.add(Rect3D(Vector3D(x2, y1, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x2, y1, wz2), windowColor, isWindow = true))
-                            }
+                            // Vertical window - frame on left or right edge
+                            val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(frameX, y1, opZ1),
+                                Vector3D(frameX, y2, opZ1),
+                                Vector3D(frameX, y2, opZ2),
+                                Vector3D(frameX, y1, opZ2),
+                                windowColor,
+                                isWindow = true
+                            ))
                         } else {
-                            val centerX = (x1 + x2) / 2.0
-                            val centerY = (y1 + y2) / 2.0
-                            
-                            val hasRoomTop = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY - 5).toInt())) }
-                            val hasRoomBottom = rooms.any { it.getBounds().contains(Point(centerX.toInt(), (centerY + 5).toInt())) }
-                            
-                            if (!hasRoomTop) {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                            } else if (!hasRoomBottom) {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
-                            } else {
-                                model3d.rects.add(Rect3D(Vector3D(x1, y1, wz1), Vector3D(x2, y1, wz1), Vector3D(x2, y1, wz2), Vector3D(x1, y1, wz2), windowColor, isWindow = true))
-                                model3d.rects.add(Rect3D(Vector3D(x1, y2, wz1), Vector3D(x2, y2, wz1), Vector3D(x2, y2, wz2), Vector3D(x1, y2, wz2), windowColor, isWindow = true))
-                            }
+                            // Horizontal window - frame on top or bottom edge
+                            val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
+                            model3d.rects.add(Rect3D(
+                                Vector3D(x1, frameY, opZ1),
+                                Vector3D(x2, frameY, opZ1),
+                                Vector3D(x2, frameY, opZ2),
+                                Vector3D(x1, frameY, opZ2),
+                                windowColor,
+                                isWindow = true
+                            ))
                         }
                     }
                     is Door -> {
@@ -2027,6 +2071,7 @@ class FloorPlanApp {
                         if (el is PlanWindow) {
                             elNode.setAttribute("height3D", el.height3D.toString())
                             elNode.setAttribute("aboveFloorHeight", el.sillElevation.toString())
+                            elNode.setAttribute("windowPosition", el.windowPosition.name)
                         }
                         if (el is Door) elNode.setAttribute("height3D", el.verticalHeight.toString())
                         if (el is Room) {
@@ -2106,7 +2151,10 @@ class FloorPlanApp {
                         val h = eElement.getAttribute("height").toInt()
                         val h3d = if (eElement.hasAttribute("height3D")) eElement.getAttribute("height3D").toInt() else 150
                         val afh = if (eElement.hasAttribute("aboveFloorHeight")) eElement.getAttribute("aboveFloorHeight").toInt() else 90
-                        PlanWindow(x, y, w, h, h3d, afh)
+                        val wp = if (eElement.hasAttribute("windowPosition")) {
+                            WindowPosition.valueOf(eElement.getAttribute("windowPosition"))
+                        } else WindowPosition.XY
+                        PlanWindow(x, y, w, h, h3d, afh, wp)
                     }
                     ElementType.DOOR -> {
                         val x = eElement.getAttribute("x").toInt()
