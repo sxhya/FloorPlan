@@ -174,9 +174,16 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         }
         if (el is Room) {
             dimensionTableModel.addRow(arrayOf("Floor thickness", el.floorThickness))
+            dimensionTableModel.addRow(arrayOf("Z-offset", el.zOffset))
         }
         if (el is PolygonRoom) {
             dimensionTableModel.addRow(arrayOf("Floor thickness", el.floorThickness))
+            dimensionTableModel.addRow(arrayOf("Z-offset", el.zOffset))
+        }
+        if (el is Stairs) {
+            dimensionTableModel.addRow(arrayOf("Direction along X", el.directionAlongX))
+            dimensionTableModel.addRow(arrayOf("Total raise", el.totalRaise))
+            dimensionTableModel.addRow(arrayOf("Z-offset", el.zOffset))
         }
 
         // Add blank row
@@ -232,16 +239,18 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         
         var newVal: Int? = null
         var doubleVal: Double? = null
+        var boolVal: Boolean? = null
         
         for (i in 0 until dimensionTableModel.rowCount) {
             if (dimensionTableModel.getValueAt(i, 0).toString().replace(":", "").trim() == source) {
                 newVal = dimensionTableModel.getValueAt(i, 1).toString().toIntOrNull()
                 doubleVal = dimensionTableModel.getValueAt(i, 1).toString().toDoubleOrNull()
+                boolVal = dimensionTableModel.getValueAt(i, 1).toString().toBooleanStrictOrNull()
                 break
             }
         }
 
-        if (newVal == null && doubleVal == null) return
+        if (newVal == null && doubleVal == null && boolVal == null) return
 
         val isChanged = when (source) {
             "X" -> el.x != newVal
@@ -259,6 +268,18 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 if (el is Room) el.floorThickness != doubleVal?.toInt() 
                 else if (el is PolygonRoom) el.floorThickness != doubleVal?.toInt()
                 else false
+            }
+            "Z-offset" -> {
+                if (el is Room) el.zOffset != doubleVal?.toInt()
+                else if (el is PolygonRoom) el.zOffset != doubleVal?.toInt()
+                else if (el is Stairs) el.zOffset != doubleVal?.toInt()
+                else false
+            }
+            "Direction along X" -> {
+                if (el is Stairs) el.directionAlongX != boolVal else false
+            }
+            "Total raise" -> {
+                if (el is Stairs) el.totalRaise != doubleVal?.toInt() else false
             }
             else -> false
         }
@@ -281,6 +302,17 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             "Floor thickness" -> {
                 if (el is Room) el.floorThickness = doubleVal!!.toInt()
                 if (el is PolygonRoom) el.floorThickness = doubleVal!!.toInt()
+            }
+            "Z-offset" -> {
+                if (el is Room) el.zOffset = doubleVal!!.toInt()
+                if (el is PolygonRoom) el.zOffset = doubleVal!!.toInt()
+                if (el is Stairs) el.zOffset = doubleVal!!.toInt()
+            }
+            "Direction along X" -> {
+                if (el is Stairs) el.directionAlongX = boolVal!!
+            }
+            "Total raise" -> {
+                if (el is Stairs) el.totalRaise = doubleVal!!.toInt()
             }
         }
         

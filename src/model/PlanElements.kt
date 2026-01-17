@@ -25,12 +25,12 @@ abstract class PlanElement(
 }
 
 class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL)
-class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15) : PlanElement(x, y, width, height, ElementType.ROOM)
+class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15, var zOffset: Int = 0) : PlanElement(x, y, width, height, ElementType.ROOM)
 class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var sillElevation: Int = 90) : PlanElement(x, y, width, height, ElementType.WINDOW)
 class Door(x: Int, y: Int, width: Int, height: Int, var verticalHeight: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)
-class Stairs(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.STAIRS)
+class Stairs(x: Int, y: Int, width: Int, height: Int, var directionAlongX: Boolean = true, var totalRaise: Int = 0, var zOffset: Int = 0) : PlanElement(x, y, width, height, ElementType.STAIRS)
 
-class PolygonRoom(val vertices: MutableList<Point>, var floorThickness: Int = 15) : PlanElement(0, 0, 0, 0, ElementType.POLYGON_ROOM) {
+class PolygonRoom(val vertices: MutableList<Point>, var floorThickness: Int = 15, var zOffset: Int = 0) : PlanElement(0, 0, 0, 0, ElementType.POLYGON_ROOM) {
     init {
         updateBounds()
     }
