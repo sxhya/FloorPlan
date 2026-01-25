@@ -734,6 +734,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 doc.app.popSepRoom.isVisible = false
                 doc.app.popAddStairsMenu.isVisible = false
                 doc.app.popConvertToPolygonMenu.isVisible = false
+                doc.app.popEditFrontFaceMenu.isVisible = false
+                doc.app.popEditBackFaceMenu.isVisible = false
             } else {
                 doc.app.popAddWallMenu.isVisible = false
                 doc.app.popAddRoomMenu.isVisible = false
@@ -747,6 +749,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 doc.app.popSepElements.isVisible = isWall
                 doc.app.popAddWindowMenu.isVisible = isWall
                 doc.app.popAddDoorMenu.isVisible = isWall
+                doc.app.popEditFrontFaceMenu.isVisible = isWall
+                doc.app.popEditBackFaceMenu.isVisible = isWall
             
                 doc.app.popSepRoom.isVisible = isRoom
                 doc.app.popAddStairsMenu.isVisible = isRoom
@@ -1514,7 +1518,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         }
 
         private fun drawSelection(g2: Graphics2D, sx: Int, sy: Int, sw: Int, sh: Int) {
-            val selectionColor = if (doc.app.activeDocument == doc) Color.RED else Color.GRAY
+            val selectionColor = if (doc.app.activeWindow == doc.window) Color.RED else Color.GRAY
             g2.color = selectionColor
             g2.setStroke(BasicStroke(2f))
             if (doc.selectedElement is PolygonRoom) {

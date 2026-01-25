@@ -24,6 +24,12 @@ class FloorPlanDocument(val app: FloorPlanApp) {
     
     var isModified = false
     
+    val kinds = mutableListOf<WallLayoutKind>(
+        WallLayoutKind("Electrical", java.awt.Color.RED),
+        WallLayoutKind("Plumbing", java.awt.Color.BLUE),
+        WallLayoutKind("Finishing", java.awt.Color.GREEN)
+    )
+
     val undoStack = mutableListOf<List<PlanElement>>()
     val redoStack = mutableListOf<List<PlanElement>>()
     val MAX_HISTORY = 10

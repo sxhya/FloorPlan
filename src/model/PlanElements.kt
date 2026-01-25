@@ -1,8 +1,17 @@
 package model
 
+import java.awt.Color
 import java.awt.Point
 import java.awt.Rectangle
 import java.io.Serializable
+
+data class WallLayoutKind(var name: String, var color: Color) : Serializable
+
+data class WallLayoutPoint(var x: Double, var z: Double, var kind: Int) : Serializable
+
+class WallLayout : Serializable {
+    val points = mutableListOf<WallLayoutPoint>()
+}
 
 enum class ElementType {
     WALL, ROOM, WINDOW, DOOR, STAIRS, POLYGON_ROOM
@@ -24,7 +33,10 @@ abstract class PlanElement(
     open fun getArea(): Double = width.toDouble() * height.toDouble()
 }
 
-class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL)
+class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL) {
+    val frontLayout = WallLayout()
+    val backLayout = WallLayout()
+}
 class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15, var zOffset: Int = 0) : PlanElement(x, y, width, height, ElementType.ROOM)
 class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var sillElevation: Int = 90, var windowPosition: WindowPosition = WindowPosition.XY) : PlanElement(x, y, width, height, ElementType.WINDOW)
 class Door(x: Int, y: Int, width: Int, height: Int, var verticalHeight: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)

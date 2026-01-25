@@ -199,12 +199,42 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun updateFieldsForActiveDocument() {
-        val el = app.activeDocument?.selectedElement
-        if (el != null) {
-            updateFields(el)
+        val activeDoc = app.activeDocument
+        if (activeDoc != null) {
+            val el = activeDoc.selectedElement
+            if (el != null) {
+                updateFields(el)
+            } else {
+                clearFields()
+            }
         } else {
-            clearFields()
+            val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
+            if (wallLayoutWindow != null) {
+                updateWallLayoutFields(wallLayoutWindow.doc)
+            } else {
+                clearFields()
+            }
         }
+    }
+
+    private fun updateWallLayoutFields(doc: ui.WallLayoutDocument) {
+        clearFields()
+        isUpdatingFields = true
+        val p = doc.selectedPoint
+        if (p != null) {
+            dimensionTableModel.addRow(arrayOf("Type", "WallLayoutPoint"))
+            dimensionTableModel.addRow(arrayOf("X", p.x.roundToInt()))
+            dimensionTableModel.addRow(arrayOf("Z", p.z.roundToInt()))
+            val kindName = doc.floorPlanDoc.kinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
+            dimensionTableModel.addRow(arrayOf("Kind", kindName))
+        } else {
+            dimensionTableModel.addRow(arrayOf("Type", "WallLayout"))
+            dimensionTableModel.addRow(arrayOf("Points count", doc.layout.points.size))
+        }
+        add(mainFieldsPanel, BorderLayout.CENTER)
+        revalidate()
+        repaint()
+        isUpdatingFields = false
     }
 
     fun updateFields(el: PlanElement) {
@@ -307,6 +337,28 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         directionComboBox.renderer = directionRenderer
         val directionEditor = DefaultCellEditor(directionComboBox)
 
+        val kindComboBox = JComboBox<String>()
+        kindComboBox.addActionListener {
+            if (dimensionTable.isEditing) {
+                val row = dimensionTable.editingRow
+                if (row != -1 && dimensionTable.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim() == "Kind") {
+                    dimensionTable.setValueAt(kindComboBox.selectedItem, row, 1)
+                }
+                dimensionTable.cellEditor?.stopCellEditing()
+            }
+        }
+        val kindEditor = object : DefaultCellEditor(kindComboBox) {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                kindComboBox.removeAllItems()
+                val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
+                val doc = wallLayoutWindow?.doc?.floorPlanDoc ?: app.activeDocument
+                doc?.kinds?.forEach {
+                    kindComboBox.addItem(it.name)
+                }
+                return super.getTableCellEditorComponent(table, value, isSelected, row, column)
+            }
+        }
+
         val defaultEditor = DefaultCellEditor(JTextField())
 
         dimensionTable.columnModel.getColumn(1).cellEditor = object : AbstractCellEditor(), TableCellEditor {
@@ -317,6 +369,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 currentEditor = when (propName) {
                     "Window Position" -> windowPositionEditor
                     "Direction along X" -> directionEditor
+                    "Kind" -> kindEditor
                     else -> defaultEditor
                 }
                 return currentEditor!!.getTableCellEditorComponent(table, value, isSelected, row, column)
@@ -348,8 +401,21 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
                 val propName = table?.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
                 
-                if (propName == "Direction along X" || propName == "Window Position") {
-                    val comboBox = if (propName == "Direction along X") directionComboBox else windowPositionComboBox
+                if (propName == "Direction along X" || propName == "Window Position" || propName == "Kind") {
+                    val comboBox = when (propName) {
+                        "Direction along X" -> directionComboBox
+                        "Window Position" -> windowPositionComboBox
+                        else -> kindComboBox
+                    }
+                    
+                    if (propName == "Kind") {
+                        kindComboBox.removeAllItems()
+                        val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
+                        val doc = wallLayoutWindow?.doc?.floorPlanDoc ?: app.activeDocument
+                        doc?.kinds?.forEach {
+                            kindComboBox.addItem(it.name)
+                        }
+                    }
                     
                     comboBox.selectedItem = value
                     
@@ -482,7 +548,58 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun applyManualChanges(source: String) {
-        val doc = app.activeDocument ?: return
+        val activeDoc = app.activeDocument
+        if (activeDoc != null) {
+            applyFloorPlanManualChanges(activeDoc, source)
+        } else {
+            val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
+            if (wallLayoutWindow != null) {
+                applyWallLayoutManualChanges(wallLayoutWindow.doc, source)
+            }
+        }
+    }
+
+    private fun applyWallLayoutManualChanges(doc: ui.WallLayoutDocument, source: String) {
+        val p = doc.selectedPoint ?: return
+        var newVal: Any? = null
+        for (i in 0 until dimensionTableModel.rowCount) {
+            val propName = dimensionTableModel.getValueAt(i, 0).toString().replace(":", "").trim()
+            if (propName == source) {
+                newVal = dimensionTableModel.getValueAt(i, 1) ?: return
+                break
+            }
+        }
+        if (newVal == null) return
+
+        when (source) {
+            "X" -> {
+                val v = newVal.toString().toDoubleOrNull() ?: return
+                if (p.x != v) {
+                    doc.saveState()
+                    p.x = v
+                    doc.window?.canvas?.repaint()
+                }
+            }
+            "Z" -> {
+                val v = newVal.toString().toDoubleOrNull() ?: return
+                if (p.z != v) {
+                    doc.saveState()
+                    p.z = v
+                    doc.window?.canvas?.repaint()
+                }
+            }
+            "Kind" -> {
+                val kindIndex = doc.floorPlanDoc.kinds.indexOfFirst { it.name == newVal.toString() }
+                if (kindIndex != -1 && p.kind != kindIndex) {
+                    doc.saveState()
+                    p.kind = kindIndex
+                    doc.window?.canvas?.repaint()
+                }
+            }
+        }
+    }
+
+    private fun applyFloorPlanManualChanges(doc: ui.FloorPlanDocument, source: String) {
         val el = doc.selectedElement ?: return
         
         var newVal: Int? = null

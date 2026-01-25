@@ -68,6 +68,8 @@ class FloorPlanApp {
     internal lateinit var popAddStairsMenu: JMenuItem
     internal lateinit var popAddFloorOpeningMenu: JMenuItem
     internal lateinit var popConvertToPolygonMenu: JMenuItem
+    internal lateinit var popEditFrontFaceMenu: JMenuItem
+    internal lateinit var popEditBackFaceMenu: JMenuItem
 
     init {
         Platform.setImplicitExit(false)
@@ -499,6 +501,12 @@ class FloorPlanApp {
         
         menuBars.add(menuBar)
         updateRecentMenu()
+        val utilitiesMenu = JMenu("Utilities")
+        val manageKindsItem = JMenuItem("Manage Wall Layout Kinds")
+        manageKindsItem.addActionListener { showManageKindsDialog() }
+        utilitiesMenu.add(manageKindsItem)
+        toolsMenu.add(utilitiesMenu)
+        
         return menuBar
     }
 
@@ -1435,6 +1443,26 @@ class FloorPlanApp {
             }
         }
         popupMenu.add(popConvertToPolygonMenu)
+
+        popEditFrontFaceMenu = JMenuItem("Edit Front Face")
+        popEditFrontFaceMenu.addActionListener {
+            activeDocument?.let { doc ->
+                (doc.selectedElement as? Wall)?.let { wall ->
+                    WallLayoutWindow(this, WallLayoutDocument(this, doc, wall, wall.frontLayout, true))
+                }
+            }
+        }
+        popupMenu.add(popEditFrontFaceMenu)
+
+        popEditBackFaceMenu = JMenuItem("Edit Back Face")
+        popEditBackFaceMenu.addActionListener {
+            activeDocument?.let { doc ->
+                (doc.selectedElement as? Wall)?.let { wall ->
+                    WallLayoutWindow(this, WallLayoutDocument(this, doc, wall, wall.backLayout, false))
+                }
+            }
+        }
+        popupMenu.add(popEditBackFaceMenu)
     }
 
     internal fun refreshUI() {
@@ -1447,6 +1475,7 @@ class FloorPlanApp {
     }
     
     fun getOpenDocuments(): List<FloorPlanDocument> = documents.toList()
+    fun getThreeDDocuments(): List<ThreeDDocument> = threeDDocuments.toList()
     
     fun regenerate3DModelFromFloors(doc3d: ThreeDDocument) {
         // Parse floor files and regenerate the 3D model
@@ -1941,6 +1970,109 @@ class FloorPlanApp {
 
     internal fun repaintAllCanvases() {
         documents.forEach { it.canvas.repaint() }
+        threeDDocuments.forEach { it.panel.repaint() }
+        for (w in Window.getWindows()) {
+            if (w is WallLayoutWindow) {
+                w.canvas.repaint()
+            }
+        }
+    }
+
+    private fun showManageKindsDialog() {
+        val doc = activeDocument ?: return
+        val dialog = JDialog(activeWindow, "Manage Wall Layout Kinds", true)
+        dialog.layout = BorderLayout()
+        dialog.setSize(400, 350)
+        dialog.setLocationRelativeTo(activeWindow)
+
+        val model = object : DefaultTableModel(arrayOf("Name", "Color"), 0) {
+            override fun getColumnClass(columnIndex: Int): Class<*> = if (columnIndex == 1) Color::class.java else String::class.java
+        }
+        for (kind in doc.kinds) {
+            model.addRow(arrayOf(kind.name, kind.color))
+        }
+        val table = JTable(model)
+        table.putClientProperty("terminateEditOnFocusLost", true)
+
+        table.columnModel.getColumn(1).setCellRenderer(object : javax.swing.table.TableCellRenderer {
+            override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
+                val panel = JPanel()
+                if (value is Color) {
+                    panel.background = value
+                }
+                if (isSelected) {
+                    panel.border = BorderFactory.createLineBorder(table?.selectionForeground, 2)
+                } else {
+                    panel.border = BorderFactory.createLineBorder(Color.GRAY, 1)
+                }
+                return panel
+            }
+        })
+
+        table.columnModel.getColumn(1).setCellEditor(object : javax.swing.AbstractCellEditor(), javax.swing.table.TableCellEditor {
+            private var currentColor: Color? = null
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                currentColor = value as? Color
+                val panel = JPanel()
+                panel.background = currentColor
+                
+                SwingUtilities.invokeLater {
+                    val color = JColorChooser.showDialog(dialog, "Choose Kind Color", currentColor ?: Color.RED)
+                    if (color != null) {
+                        currentColor = color
+                        stopCellEditing()
+                    } else {
+                        cancelCellEditing()
+                    }
+                }
+                return panel
+            }
+
+            override fun getCellEditorValue(): Any? = currentColor
+        })
+
+        val scrollPane = JScrollPane(table)
+        dialog.add(scrollPane, BorderLayout.CENTER)
+
+        val topPanel = JPanel()
+        val addBtn = JButton("Add Kind")
+        addBtn.addActionListener {
+            val color = JColorChooser.showDialog(dialog, "Choose Kind Color", Color.RED)
+            if (color != null) {
+                model.addRow(arrayOf("New Kind", color))
+            }
+        }
+        val removeBtn = JButton("Remove Kind")
+        removeBtn.addActionListener {
+            if (table.selectedRow != -1) model.removeRow(table.selectedRow)
+        }
+        topPanel.add(addBtn)
+        topPanel.add(removeBtn)
+        dialog.add(topPanel, BorderLayout.NORTH)
+
+        val bottomPanel = JPanel()
+        val okBtn = JButton("OK")
+        okBtn.addActionListener {
+            if (table.isEditing) table.cellEditor.stopCellEditing()
+            doc.kinds.clear()
+            for (i in 0 until model.rowCount) {
+                val name = model.getValueAt(i, 0) as String
+                val color = model.getValueAt(i, 1) as Color
+                doc.kinds.add(WallLayoutKind(name, color))
+            }
+            doc.isModified = true
+            repaintAllCanvases()
+            dialog.dispose()
+        }
+        val cancelBtn = JButton("Cancel")
+        cancelBtn.addActionListener {
+            dialog.dispose()
+        }
+        bottomPanel.add(okBtn)
+        bottomPanel.add(cancelBtn)
+        dialog.add(bottomPanel, BorderLayout.SOUTH)
+
+        dialog.isVisible = true
     }
 
     internal fun updateUndoRedoStates() {
@@ -2054,6 +2186,13 @@ class FloorPlanApp {
                 
                 val rootElement = xmlDoc.createElement("FloorPlan")
                 xmlDoc.appendChild(rootElement)
+
+                for (kind in doc.kinds) {
+                    val kNode = xmlDoc.createElement("Kind")
+                    kNode.setAttribute("name", kind.name)
+                    kNode.setAttribute("color", kind.color.rgb.toString())
+                    rootElement.appendChild(kNode)
+                }
                 
                 for (el in doc.elements) {
                     val elNode = xmlDoc.createElement("Element")
@@ -2068,6 +2207,21 @@ class FloorPlanApp {
                         elNode.setAttribute("y", el.y.toString())
                         elNode.setAttribute("width", el.width.toString())
                         elNode.setAttribute("height", el.height.toString())
+                        if (el is Wall) {
+                            fun addLayout(layout: WallLayout, tagName: String) {
+                                val layoutNode = xmlDoc.createElement(tagName)
+                                for (p in layout.points) {
+                                    val pNode = xmlDoc.createElement("Point")
+                                    pNode.setAttribute("x", p.x.toString())
+                                    pNode.setAttribute("z", p.z.toString())
+                                    pNode.setAttribute("kind", p.kind.toString())
+                                    layoutNode.appendChild(pNode)
+                                }
+                                elNode.appendChild(layoutNode)
+                            }
+                            addLayout(el.frontLayout, "FrontLayout")
+                            addLayout(el.backLayout, "BackLayout")
+                        }
                         if (el is PlanWindow) {
                             elNode.setAttribute("height3D", el.height3D.toString())
                             elNode.setAttribute("aboveFloorHeight", el.sillElevation.toString())
@@ -2133,7 +2287,25 @@ class FloorPlanApp {
                         val y = eElement.getAttribute("y").toInt()
                         val w = eElement.getAttribute("width").toInt()
                         val h = eElement.getAttribute("height").toInt()
-                        Wall(x, y, w, h)
+                        val wall = Wall(x, y, w, h)
+                        
+                        fun parseLayout(layout: WallLayout, tagName: String) {
+                            val layoutNodes = eElement.getElementsByTagName(tagName)
+                            if (layoutNodes.length > 0) {
+                                val layoutElement = layoutNodes.item(0) as Element
+                                val pointNodes = layoutElement.getElementsByTagName("Point")
+                                for (j in 0 until pointNodes.length) {
+                                    val pElement = pointNodes.item(j) as Element
+                                    val px = pElement.getAttribute("x").toDouble()
+                                    val pz = pElement.getAttribute("z").toDouble()
+                                    val pk = pElement.getAttribute("kind").toInt()
+                                    layout.points.add(WallLayoutPoint(px, pz, pk))
+                                }
+                            }
+                        }
+                        parseLayout(wall.frontLayout, "FrontLayout")
+                        parseLayout(wall.backLayout, "BackLayout")
+                        wall
                     }
                     ElementType.ROOM -> {
                         val x = eElement.getAttribute("x").toInt()
@@ -2260,6 +2432,18 @@ class FloorPlanApp {
             val newElements = parseFloorElements(xmlDoc)
             
             val doc = FloorPlanDocument(this)
+            
+            val kindNodes = xmlDoc.getElementsByTagName("Kind")
+            if (kindNodes.length > 0) {
+                doc.kinds.clear()
+                for (i in 0 until kindNodes.length) {
+                    val kElement = kindNodes.item(i) as Element
+                    val name = kElement.getAttribute("name")
+                    val color = Color(kElement.getAttribute("color").toInt())
+                    doc.kinds.add(WallLayoutKind(name, color))
+                }
+            }
+
             doc.elements.addAll(newElements)
             doc.currentFile = file
             
