@@ -67,6 +67,7 @@ class FloorPlanApp {
     internal lateinit var popSepRoom: JSeparator
     internal lateinit var popAddStairsMenu: JMenuItem
     internal lateinit var popAddFloorOpeningMenu: JMenuItem
+    internal lateinit var popAddUtilityMenu: JMenu
     internal lateinit var popConvertToPolygonMenu: JMenuItem
     internal lateinit var popEditFrontFaceMenu: JMenuItem
     internal lateinit var popEditBackFaceMenu: JMenuItem
@@ -1362,6 +1363,9 @@ class FloorPlanApp {
         popAddFloorOpeningMenu.addActionListener { sidePanel.addElement(ElementType.POLYGON_ROOM) }
         popupMenu.add(popAddFloorOpeningMenu)
 
+        popAddUtilityMenu = JMenu("Add utility connection")
+        popupMenu.add(popAddUtilityMenu)
+
         popSepGeneral = JSeparator()
         popupMenu.add(popSepGeneral)
 
@@ -2237,6 +2241,15 @@ class FloorPlanApp {
                             elNode.setAttribute("totalRaise", el.totalRaise.toString())
                             elNode.setAttribute("zOffset", el.zOffset.toString())
                         }
+                        if (el is UtilitiesConnection) {
+                            elNode.setAttribute("startWallIndex", doc.elements.indexOf(el.startWall).toString())
+                            elNode.setAttribute("startIsFront", el.startIsFront.toString())
+                            elNode.setAttribute("startPointIndex", (if (el.startIsFront) el.startWall.frontLayout else el.startWall.backLayout).points.indexOf(el.startPoint).toString())
+                            elNode.setAttribute("endWallIndex", doc.elements.indexOf(el.endWall).toString())
+                            elNode.setAttribute("endIsFront", el.endIsFront.toString())
+                            elNode.setAttribute("endPointIndex", (if (el.endIsFront) el.endWall.frontLayout else el.endWall.backLayout).points.indexOf(el.endPoint).toString())
+                            elNode.setAttribute("kind", el.kind.toString())
+                        }
                     }
                     rootElement.appendChild(elNode)
                 }
@@ -2274,12 +2287,27 @@ class FloorPlanApp {
 
     private fun parseFloorElements(xmlDoc: org.w3c.dom.Document): List<PlanElement> {
         val nList = xmlDoc.getElementsByTagName("Element")
-        val newElements = mutableListOf<PlanElement>()
+        val newElements = arrayOfNulls<PlanElement>(nList.length)
+        data class DeferredConn(val index: Int, val swi: Int, val sif: Boolean, val spi: Int, val ewi: Int, val eif: Boolean, val epi: Int, val kind: Int)
+        val deferred = mutableListOf<DeferredConn>()
+        
         for (i in 0 until nList.length) {
             val node = nList.item(i)
             if (node.nodeType == org.w3c.dom.Node.ELEMENT_NODE) {
                 val eElement = node as Element
                 val type = ElementType.valueOf(eElement.getAttribute("type"))
+
+                if (type == ElementType.UTILITIES_CONNECTION) {
+                    val swi = eElement.getAttribute("startWallIndex").toInt()
+                    val sif = eElement.getAttribute("startIsFront").toBoolean()
+                    val spi = eElement.getAttribute("startPointIndex").toInt()
+                    val ewi = eElement.getAttribute("endWallIndex").toInt()
+                    val eif = eElement.getAttribute("endIsFront").toBoolean()
+                    val epi = eElement.getAttribute("endPointIndex").toInt()
+                    val kind = eElement.getAttribute("kind").toInt()
+                    deferred.add(DeferredConn(i, swi, sif, spi, ewi, eif, epi, kind))
+                    continue
+                }
 
                 val el = when (type) {
                     ElementType.WALL -> {
@@ -2297,7 +2325,7 @@ class FloorPlanApp {
                                 for (j in 0 until pointNodes.length) {
                                     val pElement = pointNodes.item(j) as Element
                                     val px = pElement.getAttribute("x").toDouble()
-                                    val pz = pElement.getAttribute("z").toDouble()
+                                    val pz = pElement.getAttribute("z").toDouble().roundToInt()
                                     val pk = pElement.getAttribute("kind").toInt()
                                     layout.points.add(WallLayoutPoint(px, pz, pk))
                                 }
@@ -2363,11 +2391,21 @@ class FloorPlanApp {
                         pr.updateBounds()
                         pr
                     }
+                    ElementType.UTILITIES_CONNECTION -> throw IllegalStateException("Should have been handled above")
                 }
-                newElements.add(el)
+                newElements[i] = el
             }
         }
-        return newElements
+        
+        for (d in deferred) {
+            val startWall = newElements[d.swi] as Wall
+            val startPoint = (if (d.sif) startWall.frontLayout else startWall.backLayout).points[d.spi]
+            val endWall = newElements[d.ewi] as Wall
+            val endPoint = (if (d.eif) endWall.frontLayout else endWall.backLayout).points[d.epi]
+            newElements[d.index] = UtilitiesConnection(startPoint, startWall, d.sif, endPoint, endWall, d.eif, d.kind)
+        }
+        
+        return newElements.filterNotNull()
     }
 
     private fun openFile(file: File, savedState: WindowState? = null) {

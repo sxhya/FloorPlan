@@ -1,7 +1,7 @@
 package model
 
 enum class AppMode {
-    NORMAL, DRAG, RULER
+    NORMAL, DRAG, RULER, UTILITY_CONNECTION_ADDING
 }
 
 enum class ResizeHandle {

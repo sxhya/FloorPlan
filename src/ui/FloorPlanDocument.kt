@@ -29,6 +29,8 @@ class FloorPlanDocument(val app: FloorPlanApp) {
         WallLayoutKind("Plumbing", java.awt.Color.BLUE),
         WallLayoutKind("Finishing", java.awt.Color.GREEN)
     )
+    val visibleKinds = mutableSetOf<Int>()
+    var addingUtilityKind: Int? = null
 
     val undoStack = mutableListOf<List<PlanElement>>()
     val redoStack = mutableListOf<List<PlanElement>>()
@@ -301,19 +303,17 @@ class FloorPlanDocument(val app: FloorPlanApp) {
     }
 
     private fun cloneElements(source: List<PlanElement>): List<PlanElement> {
-        val cloned = mutableListOf<PlanElement>()
-        for (el in source) {
-            val newEl = when (el) {
-                is Wall -> Wall(el.x, el.y, el.width, el.height)
-                is Room -> Room(el.x, el.y, el.width, el.height, el.floorThickness, el.zOffset)
-                is Window -> Window(el.x, el.y, el.width, el.height, el.height3D, el.sillElevation, el.windowPosition)
-                is Door -> Door(el.x, el.y, el.width, el.height, el.verticalHeight)
-                is Stairs -> Stairs(el.x, el.y, el.width, el.height, el.directionAlongX, el.totalRaise, el.zOffset)
-                is PolygonRoom -> PolygonRoom(el.vertices.map { Point(it.x, it.y) }.toMutableList(), el.floorThickness, el.zOffset)
-                else -> null
-            }
-            newEl?.let { cloned.add(it) }
+        try {
+            val baos = java.io.ByteArrayOutputStream()
+            val oos = java.io.ObjectOutputStream(baos)
+            oos.writeObject(ArrayList(source))
+            val bais = java.io.ByteArrayInputStream(baos.toByteArray())
+            val ois = java.io.ObjectInputStream(bais)
+            @Suppress("UNCHECKED_CAST")
+            return ois.readObject() as List<PlanElement>
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return emptyList()
         }
-        return cloned
     }
 }

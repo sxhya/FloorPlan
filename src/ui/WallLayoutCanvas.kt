@@ -31,7 +31,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 
                 dragPoint = doc.layout.points.find { p ->
                     val sx = doc.modelToScreen(p.x, doc.offsetX)
-                    val sy = doc.modelToScreen(p.z, doc.offsetY, true)
+                    val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
                     abs(sx - e.x) <= pointRadius && abs(sy - e.y) <= pointRadius
                 }
                 
@@ -82,11 +82,11 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 for (p in doc.layout.points) {
                     if (p === dp) continue
                     if (abs(p.x - newX) < threshold) newX = p.x
-                    if (abs(p.z - newZ) < threshold) newZ = p.z
+                    if (abs(p.z.toDouble() - newZ) < threshold) newZ = p.z.toDouble()
                 }
                 
                 dp.x = newX
-                dp.z = newZ
+                dp.z = newZ.roundToInt()
                 
                 lastMouseX = e.x
                 lastMouseY = e.y
@@ -118,7 +118,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
             
             val modelX = doc.screenToModel(e.x, doc.offsetX).coerceIn(doc.wallStart, doc.wallEnd)
-            val modelZ = doc.screenToModel(e.y, doc.offsetY, true).coerceIn(0.0, wallHeight)
+            val modelZ = doc.screenToModel(e.y, doc.offsetY, true).coerceIn(0.0, wallHeight).roundToInt()
             doc.layout.points.add(WallLayoutPoint(modelX, modelZ, 0))
             doc.saveState()
             repaint()
@@ -127,7 +127,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
 
         val pointUnderMouse = doc.layout.points.find { p ->
             val sx = doc.modelToScreen(p.x, doc.offsetX)
-            val sy = doc.modelToScreen(p.z, doc.offsetY, true)
+            val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
             abs(sx - e.x) <= pointRadius && abs(sy - e.y) <= pointRadius
         }
 
@@ -199,7 +199,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
     ) {
         // Collect all relevant X and Z coordinates for the Hanan grid
         val xCoords = mutableSetOf(wallStart, wallEnd, p1.x, p2.x)
-        val zCoords = mutableSetOf(0.0, wallHeight, p1.z, p2.z)
+        val zCoords = mutableSetOf(0.0, wallHeight, p1.z.toDouble(), p2.z.toDouble())
         
         for (op in openings) {
             xCoords.add(op.x)
@@ -212,8 +212,8 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val sortedZ = zCoords.filter { it in 0.0..wallHeight }.sorted()
         
         // A* algorithm on the Hanan grid
-        val startPos = Pair(sortedX.indexOf(p1.x), sortedZ.indexOf(p1.z))
-        val targetPos = Pair(sortedX.indexOf(p2.x), sortedZ.indexOf(p2.z))
+        val startPos = Pair(sortedX.indexOf(p1.x), sortedZ.indexOf(p1.z.toDouble()))
+        val targetPos = Pair(sortedX.indexOf(p2.x), sortedZ.indexOf(p2.z.toDouble()))
         
         if (startPos.first == -1 || startPos.second == -1 || targetPos.first == -1 || targetPos.second == -1) {
             // Fallback to simple path if something goes wrong
@@ -377,9 +377,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
 
     private fun drawOrthogonalPath(g2: Graphics2D, p1: WallLayoutPoint, p2: WallLayoutPoint) {
         val x1 = doc.modelToScreen(p1.x, doc.offsetX)
-        val z1 = doc.modelToScreen(p1.z, doc.offsetY, true)
+        val z1 = doc.modelToScreen(p1.z.toDouble(), doc.offsetY, true)
         val x2 = doc.modelToScreen(p2.x, doc.offsetX)
-        val z2 = doc.modelToScreen(p2.z, doc.offsetY, true)
+        val z2 = doc.modelToScreen(p2.z.toDouble(), doc.offsetY, true)
         
         // Orthogonal path from (x1, z1) to (x2, z2)
         // Two options: (x1, z1) -> (x2, z1) -> (x2, z2) OR (x1, z1) -> (x1, z2) -> (x2, z2)
@@ -640,7 +640,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
     private fun drawPoints(g2: Graphics2D) {
         for (p in doc.layout.points) {
             val sx = doc.modelToScreen(p.x, doc.offsetX)
-            val sy = doc.modelToScreen(p.z, doc.offsetY, true)
+            val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
             
             val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
             g2.color = kind?.color ?: Color.BLACK

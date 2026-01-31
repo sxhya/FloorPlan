@@ -3,11 +3,13 @@ package model
 import java.awt.Color
 import java.awt.Point
 import java.awt.Rectangle
+import java.awt.geom.Line2D
+import java.awt.geom.Point2D
 import java.io.Serializable
 
 data class WallLayoutKind(var name: String, var color: Color) : Serializable
 
-data class WallLayoutPoint(var x: Double, var z: Double, var kind: Int) : Serializable
+data class WallLayoutPoint(var x: Double, var z: Int, var kind: Int) : Serializable
 
 class WallLayout : Serializable {
     val points = mutableListOf<WallLayoutPoint>()
@@ -15,7 +17,7 @@ class WallLayout : Serializable {
 }
 
 enum class ElementType {
-    WALL, ROOM, WINDOW, DOOR, STAIRS, POLYGON_ROOM
+    WALL, ROOM, WINDOW, DOOR, STAIRS, POLYGON_ROOM, UTILITIES_CONNECTION
 }
 
 abstract class PlanElement(
@@ -42,6 +44,55 @@ class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15
 class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var sillElevation: Int = 90, var windowPosition: WindowPosition = WindowPosition.XY) : PlanElement(x, y, width, height, ElementType.WINDOW)
 class Door(x: Int, y: Int, width: Int, height: Int, var verticalHeight: Int = 200) : PlanElement(x, y, width, height, ElementType.DOOR)
 class Stairs(x: Int, y: Int, width: Int, height: Int, var directionAlongX: Boolean = true, var totalRaise: Int = 0, var zOffset: Int = 0) : PlanElement(x, y, width, height, ElementType.STAIRS)
+
+class UtilitiesConnection(
+    var startPoint: WallLayoutPoint,
+    var startWall: Wall,
+    var startIsFront: Boolean,
+    var endPoint: WallLayoutPoint,
+    var endWall: Wall,
+    var endIsFront: Boolean,
+    val kind: Int
+) : PlanElement(0, 0, 0, 0, ElementType.UTILITIES_CONNECTION) {
+
+    init {
+        updateBounds()
+    }
+
+    fun updateBounds() {
+        val p1 = getFloorPlanCoords(startPoint, startWall, startIsFront)
+        val p2 = getFloorPlanCoords(endPoint, endWall, endIsFront)
+
+        val minX = Math.min(p1.x, p2.x).toInt()
+        val minY = Math.min(p1.y, p2.y).toInt()
+        val maxX = Math.max(p1.x, p2.x).toInt()
+        val maxY = Math.max(p1.y, p2.y).toInt()
+
+        x = minX
+        y = minY
+        width = Math.max(1, maxX - minX)
+        height = Math.max(1, maxY - minY)
+    }
+
+    fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): Point2D.Double {
+        val isVertical = wall.width < wall.height
+        return if (isVertical) {
+            val fx = if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
+            Point2D.Double(fx, p.x)
+        } else {
+            val fy = if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
+            Point2D.Double(p.x, fy)
+        }
+    }
+
+    override fun contains(px: Int, py: Int): Boolean {
+        val p1 = getFloorPlanCoords(startPoint, startWall, startIsFront)
+        val p2 = getFloorPlanCoords(endPoint, endWall, endIsFront)
+
+        val dist = Line2D.ptSegDist(p1.x, p1.y, p2.x, p2.y, px.toDouble(), py.toDouble())
+        return dist < 10.0
+    }
+}
 
 class PolygonRoom(val vertices: MutableList<Point>, var floorThickness: Int = 15, var zOffset: Int = 0) : PlanElement(0, 0, 0, 0, ElementType.POLYGON_ROOM) {
     init {

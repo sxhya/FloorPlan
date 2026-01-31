@@ -31,8 +31,10 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         override fun isCellEditable(row: Int, column: Int): Boolean {
             if (column != 1) return false
             val prop = getValueAt(row, 0)?.toString() ?: return false
+            val el = app.activeDocument?.selectedElement
             return when (prop) {
                 "Type", "Element Area", "Opening Area", "Opening Volume", "" -> false
+                "Kind" -> if (el is UtilitiesConnection) false else true
                 else -> true
             }
         }
@@ -224,7 +226,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         if (p != null) {
             dimensionTableModel.addRow(arrayOf("Type", "WallLayoutPoint"))
             dimensionTableModel.addRow(arrayOf("X", p.x.roundToInt()))
-            dimensionTableModel.addRow(arrayOf("Z", p.z.roundToInt()))
+            dimensionTableModel.addRow(arrayOf("Z", p.z))
             val kindName = doc.floorPlanDoc.kinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
             dimensionTableModel.addRow(arrayOf("Kind", kindName))
         } else {
@@ -241,10 +243,12 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         clearFields()
         isUpdatingFields = true
         dimensionTableModel.addRow(arrayOf("Type", el.javaClass.simpleName))
-        dimensionTableModel.addRow(arrayOf("X", el.x))
-        dimensionTableModel.addRow(arrayOf("Y", el.y))
-        dimensionTableModel.addRow(arrayOf("Plan width", el.width))
-        dimensionTableModel.addRow(arrayOf("Plan height", el.height))
+        if (el !is UtilitiesConnection) {
+            dimensionTableModel.addRow(arrayOf("X", el.x))
+            dimensionTableModel.addRow(arrayOf("Y", el.y))
+            dimensionTableModel.addRow(arrayOf("Plan width", el.width))
+            dimensionTableModel.addRow(arrayOf("Plan height", el.height))
+        }
         if (el is PlanWindow || el is Door) {
             val h3d = if (el is PlanWindow) el.height3D else (el as Door).verticalHeight
             dimensionTableModel.addRow(arrayOf("Vertical height", h3d))
@@ -265,6 +269,12 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             dimensionTableModel.addRow(arrayOf("Direction along X", el.directionAlongX))
             dimensionTableModel.addRow(arrayOf("Total raise", el.totalRaise))
             dimensionTableModel.addRow(arrayOf("Z-offset", el.zOffset))
+        }
+        if (el is UtilitiesConnection) {
+            val doc = app.activeDocument ?: return
+            dimensionTableModel.addRow(arrayOf("Kind", doc.kinds.getOrNull(el.kind)?.name ?: "Kind ${el.kind}"))
+            dimensionTableModel.addRow(arrayOf("Start Point", formatPoint(el.startPoint, el.startWall, el.startIsFront)))
+            dimensionTableModel.addRow(arrayOf("End Point", formatPoint(el.endPoint, el.endWall, el.endIsFront)))
         }
 
         // Add blank row
@@ -359,6 +369,36 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
         }
 
+        val pointComboBox = JComboBox<PointInfo>()
+        pointComboBox.addActionListener {
+            if (dimensionTable.isEditing) {
+                val row = dimensionTable.editingRow
+                val propName = dimensionTable.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
+                if (row != -1 && (propName == "Start Point" || propName == "End Point")) {
+                    dimensionTable.setValueAt(pointComboBox.selectedItem, row, 1)
+                }
+                dimensionTable.cellEditor?.stopCellEditing()
+            }
+        }
+        val pointEditor = object : DefaultCellEditor(pointComboBox) {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                pointComboBox.removeAllItems()
+                val doc = app.activeDocument
+                val el = doc?.selectedElement as? UtilitiesConnection
+                if (doc != null && el != null) {
+                    doc.elements.filterIsInstance<Wall>().forEach { wall ->
+                        wall.frontLayout.points.filter { it.kind == el.kind }.forEach { p ->
+                            pointComboBox.addItem(PointInfo(p, wall, true))
+                        }
+                        wall.backLayout.points.filter { it.kind == el.kind }.forEach { p ->
+                            pointComboBox.addItem(PointInfo(p, wall, false))
+                        }
+                    }
+                }
+                return super.getTableCellEditorComponent(table, value, isSelected, row, column)
+            }
+        }
+
         val defaultEditor = DefaultCellEditor(JTextField())
 
         dimensionTable.columnModel.getColumn(1).cellEditor = object : AbstractCellEditor(), TableCellEditor {
@@ -370,6 +410,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                     "Window Position" -> windowPositionEditor
                     "Direction along X" -> directionEditor
                     "Kind" -> kindEditor
+                    "Start Point", "End Point" -> pointEditor
                     else -> defaultEditor
                 }
                 return currentEditor!!.getTableCellEditorComponent(table, value, isSelected, row, column)
@@ -547,6 +588,39 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         isUpdatingFields = false
     }
 
+    private fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): java.awt.geom.Point2D.Double {
+        val isVertical = wall.width < wall.height
+        return if (isVertical) {
+            val fx = if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
+            java.awt.geom.Point2D.Double(fx, p.x)
+        } else {
+            val fy = if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
+            java.awt.geom.Point2D.Double(p.x, fy)
+        }
+    }
+
+    private fun formatPoint(p: WallLayoutPoint, wall: Wall, isFront: Boolean): String {
+        val coords = getFloorPlanCoords(p, wall, isFront)
+        return "X:%.1f, Y:%.1f, Z:%d".format(coords.x, coords.y, p.z)
+    }
+
+    data class PointInfo(val point: WallLayoutPoint, val wall: Wall, val isFront: Boolean) {
+        override fun toString(): String {
+            val isVertical = wall.width < wall.height
+            val fx = if (isVertical) {
+                if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
+            } else {
+                point.x
+            }
+            val fy = if (isVertical) {
+                point.x
+            } else {
+                if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
+            }
+            return "X:%.1f, Y:%.1f, Z:%d".format(fx, fy, point.z)
+        }
+    }
+
     fun applyManualChanges(source: String) {
         val activeDoc = app.activeDocument
         if (activeDoc != null) {
@@ -581,7 +655,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 }
             }
             "Z" -> {
-                val v = newVal.toString().toDoubleOrNull() ?: return
+                val v = newVal.toString().toDoubleOrNull()?.roundToInt() ?: return
                 if (p.z != v) {
                     doc.saveState()
                     p.z = v
@@ -606,13 +680,16 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         var doubleVal: Double? = null
         var boolVal: Boolean? = null
         var posVal: WindowPosition? = null
+        var pointVal: PointInfo? = null
         
         for (i in 0 until dimensionTableModel.rowCount) {
             val propName = dimensionTableModel.getValueAt(i, 0).toString().replace(":", "").trim()
             if (propName == source) {
                 val value = dimensionTableModel.getValueAt(i, 1) ?: return
                 
-                if (value is WindowPosition) {
+                if (value is PointInfo) {
+                    pointVal = value
+                } else if (value is WindowPosition) {
                     posVal = value
                 } else if (value is Boolean) {
                     boolVal = value
@@ -627,7 +704,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
         }
 
-        if (newVal == null && doubleVal == null && boolVal == null && posVal == null) return
+        if (newVal == null && doubleVal == null && boolVal == null && posVal == null && pointVal == null) return
 
         val isChanged = when (source) {
             "X" -> el.x != newVal
@@ -660,6 +737,16 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Window Position" -> {
                 if (el is PlanWindow) el.windowPosition != posVal else false
+            }
+            "Start Point" -> {
+                if (el is UtilitiesConnection) {
+                    el.startPoint != pointVal?.point || el.startWall != pointVal?.wall || el.startIsFront != pointVal?.isFront
+                } else false
+            }
+            "End Point" -> {
+                if (el is UtilitiesConnection) {
+                    el.endPoint != pointVal?.point || el.endWall != pointVal?.wall || el.endIsFront != pointVal?.isFront
+                } else false
             }
             else -> false
         }
@@ -696,6 +783,22 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
             "Window Position" -> {
                 if (el is PlanWindow) el.windowPosition = posVal!!
+            }
+            "Start Point" -> {
+                if (el is UtilitiesConnection && pointVal != null) {
+                    el.startPoint = pointVal.point
+                    el.startWall = pointVal.wall
+                    el.startIsFront = pointVal.isFront
+                    el.updateBounds()
+                }
+            }
+            "End Point" -> {
+                if (el is UtilitiesConnection && pointVal != null) {
+                    el.endPoint = pointVal.point
+                    el.endWall = pointVal.wall
+                    el.endIsFront = pointVal.isFront
+                    el.updateBounds()
+                }
             }
         }
         

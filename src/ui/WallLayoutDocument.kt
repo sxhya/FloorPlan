@@ -24,13 +24,12 @@ class WallLayoutDocument(
     var isModified = false
     val pixelsPerCm = Toolkit.getDefaultToolkit().screenResolution / 2.54
 
-    val isInverted = !isFront
+    val isVertical: Boolean = wall.width < wall.height
+    val isInverted: Boolean = if (wall.width > wall.height) isFront else !isFront
     val wallStart: Double
     val wallEnd: Double
-    val isVertical: Boolean
 
     init {
-        isVertical = wall.width < wall.height
         if (isVertical) {
             wallStart = wall.y.toDouble()
             wallEnd = (wall.y + wall.height).toDouble()

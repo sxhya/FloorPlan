@@ -8,6 +8,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import javax.swing.*
+import javax.swing.SwingUtilities
 import kotlin.math.*
 
 class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
@@ -37,6 +38,11 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
 
         private var vertexBeingDraggedIndex = -1
         private var hasChangedDuringInteraction = false
+
+        private var firstUtilityPoint: WallLayoutPoint? = null
+        private var firstUtilityWall: Wall? = null
+        private var firstUtilityIsFront: Boolean = false
+        private var currentUtilityMousePos: Point? = null
 
         private fun getHandleUnderMouse(p: Point): Any {
             val el = doc.selectedElement ?: return ResizeHandle.NONE
@@ -101,6 +107,9 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                             rulerProbePoint = Point(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                             repaint()
                         }
+                    } else if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING) {
+                        currentUtilityMousePos = e.point
+                        repaint()
                     }
                 }
 
@@ -115,6 +124,44 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 override fun mousePressed(e: MouseEvent) {
                     requestFocusInWindow()
                     hasChangedDuringInteraction = false
+                    if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING) {
+                        if (SwingUtilities.isRightMouseButton(e)) {
+                            doc.currentMode = AppMode.NORMAL
+                            doc.addingUtilityKind = null
+                            firstUtilityPoint = null
+                            doc.canvas.cursor = Cursor.getDefaultCursor()
+                            repaint()
+                            return
+                        }
+                        
+                        // Try to find a point of the current kind under mouse
+                        val pointInfo = findWallPointUnderMouse(e.point)
+                        if (pointInfo != null && pointInfo.first.kind == doc.addingUtilityKind) {
+                            if (firstUtilityPoint == null) {
+                                firstUtilityPoint = pointInfo.first
+                                firstUtilityWall = pointInfo.second
+                                firstUtilityIsFront = pointInfo.third
+                            } else {
+                                if (pointInfo.first != firstUtilityPoint) {
+                                    // Finish connection
+                                    val conn = UtilitiesConnection(
+                                        firstUtilityPoint!!, firstUtilityWall!!, firstUtilityIsFront,
+                                        pointInfo.first, pointInfo.second, pointInfo.third,
+                                        doc.addingUtilityKind!!
+                                    )
+                                    doc.saveState()
+                                    doc.elements.add(conn)
+                                    doc.currentMode = AppMode.NORMAL
+                                    doc.addingUtilityKind = null
+                                    firstUtilityPoint = null
+                                    doc.canvas.cursor = Cursor.getDefaultCursor()
+                                }
+                            }
+                            repaint()
+                        }
+                        return
+                    }
+
                     if (e.isPopupTrigger && doc.currentMode == AppMode.NORMAL) {
                         showPopup(e)
                         return
@@ -583,6 +630,15 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                     val dx_move = (newX - initial.x)
                                     val dy_move = (newY - initial.y)
                                     
+                                    if (element is Wall) {
+                                        val isVertical = element.width < element.height
+                                        val delta = if (isVertical) dy_move else dx_move
+                                        if (delta != 0) {
+                                            element.frontLayout.points.forEach { it.x += delta }
+                                            element.backLayout.points.forEach { it.x += delta }
+                                        }
+                                    }
+
                                     element.x = newX
                                     element.y = newY
                                     
@@ -597,6 +653,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                         }
                                         es.updateBounds()
                                     }
+                                    doc.elements.filterIsInstance<UtilitiesConnection>().forEach { it.updateBounds() }
                                 }
                                 if (element is PolygonRoom && initialVertices != null) {
                                     val dx_m = newX - initial.x
@@ -725,6 +782,20 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 // Show "Add Room Polygon" in the same menu as "Add Room"
                 doc.app.popAddFloorOpeningMenu.isVisible = true
             
+                doc.app.popAddUtilityMenu.isVisible = true
+                doc.app.popAddUtilityMenu.removeAll()
+                doc.kinds.forEachIndexed { index, kind ->
+                    val item = JMenuItem(kind.name)
+                    item.addActionListener {
+                        doc.currentMode = AppMode.UTILITY_CONNECTION_ADDING
+                        doc.addingUtilityKind = index
+                        firstUtilityPoint = null
+                        doc.canvas.cursor = Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR)
+                        doc.canvas.repaint()
+                    }
+                    doc.app.popAddUtilityMenu.add(item)
+                }
+
                 doc.app.popSepGeneral.isVisible = false
                 doc.app.popDuplicateMenu.isVisible = false
                 doc.app.popRemoveMenu.isVisible = false
@@ -1075,6 +1146,24 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             walls.forEach { drawElement(g2, it) }
             stairs.forEach { drawElement(g2, it) }
             attachments.forEach { drawElement(g2, it) }
+
+            // Draw visible utility points
+            walls.forEach { wall ->
+                drawWallPoints(g2, wall, wall.frontLayout, true)
+                drawWallPoints(g2, wall, wall.backLayout, false)
+            }
+
+            if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && firstUtilityPoint != null && currentUtilityMousePos != null) {
+                val p1 = getFloorPlanCoords(firstUtilityPoint!!, firstUtilityWall!!, firstUtilityIsFront)
+                val s1x = doc.modelToScreen(p1.x, doc.offsetX)
+                val s1y = doc.modelToScreen(p1.y, doc.offsetY)
+
+                val kind = doc.kinds.getOrNull(doc.addingUtilityKind ?: -1)
+                g2.color = kind?.color ?: Color.BLACK
+                g2.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0f, floatArrayOf(5f, 5f), 0f)
+                g2.drawLine(s1x, s1y, currentUtilityMousePos!!.x, currentUtilityMousePos!!.y)
+                g2.stroke = BasicStroke(1f)
+            }
 
             // Draw overlap regions
             val intersections = doc.calculateIntersections()
@@ -1512,16 +1601,108 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     // Skip regular fill
                     return
                 }
+                ElementType.UTILITIES_CONNECTION -> {
+                    val conn = el as UtilitiesConnection
+                    if (conn.kind !in doc.visibleKinds && doc.currentMode != AppMode.UTILITY_CONNECTION_ADDING) return
+                    
+                    val p1 = conn.getFloorPlanCoords(conn.startPoint, conn.startWall, conn.startIsFront)
+                    val p2 = conn.getFloorPlanCoords(conn.endPoint, conn.endWall, conn.endIsFront)
+                    
+                    val s1x = doc.modelToScreen(p1.x, doc.offsetX)
+                    val s1y = doc.modelToScreen(p1.y, doc.offsetY)
+                    val s2x = doc.modelToScreen(p2.x, doc.offsetX)
+                    val s2y = doc.modelToScreen(p2.y, doc.offsetY)
+                    
+                    val kind = doc.kinds.getOrNull(conn.kind)
+                    g2.color = kind?.color ?: Color.BLACK
+                    g2.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0f, floatArrayOf(5f, 5f), 0f)
+                    g2.drawLine(s1x, s1y, s2x, s2y)
+                    g2.stroke = BasicStroke(1f)
+                    return
+                }
             }
 
             g2.fillRect(sx, sy, sw, sh)
+        }
+
+        private fun drawWallPoints(g2: Graphics2D, wall: Wall, layout: WallLayout, isFront: Boolean) {
+            layout.points.forEach { p ->
+                val isAddingThisKind = doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && p.kind == doc.addingUtilityKind
+                if (p.kind in doc.visibleKinds || isAddingThisKind) {
+                    val coords = getFloorPlanCoords(p, wall, isFront)
+                    val sx = doc.modelToScreen(coords.x, doc.offsetX)
+                    val sy = doc.modelToScreen(coords.y, doc.offsetY)
+
+                    val kind = doc.kinds.getOrNull(p.kind)
+                    g2.color = kind?.color ?: Color.BLACK
+                    val r = 5
+                    g2.fillOval(sx - r, sy - r, 2 * r, 2 * r)
+                    g2.color = Color.BLACK
+                    g2.drawOval(sx - r, sy - r, 2 * r, 2 * r)
+                }
+            }
+        }
+
+        private fun findWallPointUnderMouse(p: Point): Triple<WallLayoutPoint, Wall, Boolean>? {
+            val walls = doc.elements.filterIsInstance<Wall>()
+            for (wall in walls) {
+                val resFront = findPointInLayout(p, wall, wall.frontLayout, true)
+                if (resFront != null) return Triple(resFront, wall, true)
+                val resBack = findPointInLayout(p, wall, wall.backLayout, false)
+                if (resBack != null) return Triple(resBack, wall, false)
+            }
+            return null
+        }
+
+        private fun findPointInLayout(p: Point, wall: Wall, layout: WallLayout, isFront: Boolean): WallLayoutPoint? {
+            val r = 10 // selection radius
+            for (wp in layout.points) {
+                val coords = getFloorPlanCoords(wp, wall, isFront)
+                val sx = doc.modelToScreen(coords.x, doc.offsetX)
+                val sy = doc.modelToScreen(coords.y, doc.offsetY)
+                if (abs(sx - p.x) <= r && abs(sy - p.y) <= r) return wp
+            }
+            return null
+        }
+
+        private fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): java.awt.geom.Point2D.Double {
+            val isVertical = wall.width < wall.height
+            return if (isVertical) {
+                val fx = if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
+                java.awt.geom.Point2D.Double(fx, p.x)
+            } else {
+                val fy = if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
+                java.awt.geom.Point2D.Double(p.x, fy)
+            }
         }
 
         private fun drawSelection(g2: Graphics2D, sx: Int, sy: Int, sw: Int, sh: Int) {
             val selectionColor = if (doc.app.activeWindow == doc.window) Color.RED else Color.GRAY
             g2.color = selectionColor
             g2.setStroke(BasicStroke(2f))
-            if (doc.selectedElement is PolygonRoom) {
+            if (doc.selectedElement is UtilitiesConnection) {
+                val conn = doc.selectedElement as UtilitiesConnection
+                val p1 = getFloorPlanCoords(conn.startPoint, conn.startWall, conn.startIsFront)
+                val p2 = getFloorPlanCoords(conn.endPoint, conn.endWall, conn.endIsFront)
+                
+                val s1x = doc.modelToScreen(p1.x, doc.offsetX)
+                val s1y = doc.modelToScreen(p1.y, doc.offsetY)
+                val s2x = doc.modelToScreen(p2.x, doc.offsetX)
+                val s2y = doc.modelToScreen(p2.y, doc.offsetY)
+                
+                g2.drawLine(s1x, s1y, s2x, s2y)
+                
+                val r = HANDLE_SIZE / 2
+                g2.color = Color.WHITE
+                g2.fillRect(s1x - r, s1y - r, 2 * r, 2 * r)
+                g2.color = selectionColor
+                g2.drawRect(s1x - r, s1y - r, 2 * r, 2 * r)
+                
+                g2.color = Color.WHITE
+                g2.fillRect(s2x - r, s2y - r, 2 * r, 2 * r)
+                g2.color = selectionColor
+                g2.drawRect(s2x - r, s2y - r, 2 * r, 2 * r)
+            } else if (doc.selectedElement is PolygonRoom) {
                 val poly = Polygon()
                 (doc.selectedElement as PolygonRoom).vertices.forEach {
                     poly.addPoint(doc.modelToScreen(it.x.toDouble(), doc.offsetX), doc.modelToScreen(it.y.toDouble(), doc.offsetY))

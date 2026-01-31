@@ -99,6 +99,27 @@ class EditorWindow(val app: FloorPlanApp, val doc: FloorPlanDocument) : JFrame()
             doc.canvas.repaint()
         }
         toolBar.add(zoomInBtn)
+        
+        toolBar.addSeparator()
+        
+        val visibilityBtn = JButton("Visibility")
+        visibilityBtn.addActionListener {
+            val menu = JPopupMenu()
+            doc.kinds.forEachIndexed { index, kind ->
+                val item = JCheckBoxMenuItem(kind.name, doc.visibleKinds.contains(index))
+                item.addActionListener {
+                    if (item.isSelected) {
+                        doc.visibleKinds.add(index)
+                    } else {
+                        doc.visibleKinds.remove(index)
+                    }
+                    doc.canvas.repaint()
+                }
+                menu.add(item)
+            }
+            menu.show(visibilityBtn, 0, visibilityBtn.height)
+        }
+        toolBar.add(visibilityBtn)
 
         add(toolBar, BorderLayout.NORTH)
         
