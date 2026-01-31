@@ -11,6 +11,7 @@ data class WallLayoutPoint(var x: Double, var z: Double, var kind: Int) : Serial
 
 class WallLayout : Serializable {
     val points = mutableListOf<WallLayoutPoint>()
+    var isAbsolute: Boolean = false
 }
 
 enum class ElementType {

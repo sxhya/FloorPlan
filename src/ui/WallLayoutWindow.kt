@@ -37,35 +37,19 @@ class WallLayoutWindow(val app: FloorPlanApp, val doc: WallLayoutDocument) : JFr
         
         val zoomOutBtn = JButton("🔍-")
         zoomOutBtn.addActionListener {
-            val oldScale = doc.scale
-            doc.scale = (doc.scale / 1.1).coerceAtLeast(doc.MIN_SCALE)
-            if (oldScale != doc.scale) {
-                val centerX = canvas.width / 2.0
-                val centerY = canvas.height / 2.0
-                val modelCenterX = doc.screenToModel(centerX.toInt(), doc.offsetX)
-                val modelCenterY = doc.screenToModel(centerY.toInt(), doc.offsetY, true)
-                
-                doc.offsetX = centerX / (doc.scale * doc.pixelsPerCm) - modelCenterX
-                doc.offsetY = centerY / (doc.scale * doc.pixelsPerCm) + modelCenterY
-                canvas.repaint()
-            }
+            val centerX = canvas.width / 2.0
+            val centerY = canvas.height / 2.0
+            doc.zoom(1.0 / 1.1, centerX, centerY)
+            canvas.repaint()
         }
         toolBar.add(zoomOutBtn)
         
         val zoomInBtn = JButton("🔍+")
         zoomInBtn.addActionListener {
-            val oldScale = doc.scale
-            doc.scale = (doc.scale * 1.1).coerceAtMost(doc.MAX_SCALE)
-            if (oldScale != doc.scale) {
-                val centerX = canvas.width / 2.0
-                val centerY = canvas.height / 2.0
-                val modelCenterX = doc.screenToModel(centerX.toInt(), doc.offsetX)
-                val modelCenterY = doc.screenToModel(centerY.toInt(), doc.offsetY, true)
-                
-                doc.offsetX = centerX / (doc.scale * doc.pixelsPerCm) - modelCenterX
-                doc.offsetY = centerY / (doc.scale * doc.pixelsPerCm) + modelCenterY
-                canvas.repaint()
-            }
+            val centerX = canvas.width / 2.0
+            val centerY = canvas.height / 2.0
+            doc.zoom(1.1, centerX, centerY)
+            canvas.repaint()
         }
         toolBar.add(zoomInBtn)
 

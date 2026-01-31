@@ -24,11 +24,38 @@ class WallLayoutDocument(
     var isModified = false
     val pixelsPerCm = Toolkit.getDefaultToolkit().screenResolution / 2.54
 
+    val isInverted = !isFront
+    val wallStart: Double
+    val wallEnd: Double
+    val isVertical: Boolean
+
+    init {
+        isVertical = wall.width < wall.height
+        if (isVertical) {
+            wallStart = wall.y.toDouble()
+            wallEnd = (wall.y + wall.height).toDouble()
+        } else {
+            wallStart = wall.x.toDouble()
+            wallEnd = (wall.x + wall.width).toDouble()
+        }
+
+        // Migrate points from relative to absolute if needed
+        if (!layout.isAbsolute) {
+            if (wallStart != 0.0) {
+                for (p in layout.points) {
+                    p.x += wallStart
+                }
+            }
+            layout.isAbsolute = true
+            isModified = true
+        }
+    }
+
     fun autoScaleToFit() {
         val canvas = window?.canvas ?: return
         if (canvas.width <= 0 || canvas.height <= 0) return
 
-        val wallWidth = maxOf(wall.width, wall.height).toDouble()
+        val wallWidth = (wallEnd - wallStart)
         val wallHeight = app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
 
         val margin = 40.0 // pixels
@@ -40,10 +67,46 @@ class WallLayoutDocument(
         
         scale = minOf(scaleX, scaleY).coerceIn(MIN_SCALE, MAX_SCALE)
 
-        offsetX = (canvas.width / 2.0) / (scale * pixelsPerCm) - wallWidth / 2.0
-        offsetY = (canvas.height / 2.0) / (scale * pixelsPerCm) + wallHeight / 2.0
+        val wallCenterX = (wallStart + wallEnd) / 2.0
+        val wallCenterZ = wallHeight / 2.0
+
+        if (isInverted) {
+            offsetX = wallCenterX + (canvas.width / 2.0) / (scale * pixelsPerCm)
+        } else {
+            offsetX = wallCenterX - (canvas.width / 2.0) / (scale * pixelsPerCm)
+        }
+        offsetY = wallCenterZ + (canvas.height / 2.0) / (scale * pixelsPerCm)
         
         canvas.repaint()
+    }
+
+    fun zoom(factor: Double, pivotX: Double, pivotY: Double) {
+        val modelPivotX = screenToModel(pivotX.toInt(), offsetX)
+        val modelPivotZ = screenToModel(pivotY.toInt(), offsetY, true)
+
+        val oldScale = scale
+        scale = (scale * factor).coerceIn(MIN_SCALE, MAX_SCALE)
+
+        if (scale != oldScale) {
+            if (isInverted) {
+                offsetX = modelPivotX + pivotX / (scale * pixelsPerCm)
+            } else {
+                offsetX = modelPivotX - pivotX / (scale * pixelsPerCm)
+            }
+            offsetY = modelPivotZ + pivotY / (scale * pixelsPerCm)
+        }
+    }
+
+    fun pan(dxScreen: Double, dyScreen: Double) {
+        val dxModel = dxScreen / (scale * pixelsPerCm)
+        val dyModel = dyScreen / (scale * pixelsPerCm)
+
+        if (isInverted) {
+            offsetX += dxModel
+        } else {
+            offsetX -= dxModel
+        }
+        offsetY += dyModel
     }
     
     val undoStack = mutableListOf<List<WallLayoutPoint>>()
@@ -58,18 +121,31 @@ class WallLayoutDocument(
             // Screen Y = (offsetY - modelZ) * scale * pixelsPerCm
             ((offsetVal - modelVal) * scale * pixelsPerCm).roundToInt()
         } else {
-            ((modelVal + offsetVal) * scale * pixelsPerCm).roundToInt()
+            if (isInverted) {
+                // Inverted: screenX = (offsetVal - modelX) * scale * pixelsPerCm
+                ((offsetVal - modelVal) * scale * pixelsPerCm).roundToInt()
+            } else {
+                // Normal: screenX = (modelX - offsetVal) * scale * pixelsPerCm
+                ((modelVal - offsetVal) * scale * pixelsPerCm).roundToInt()
+            }
         }
     }
 
     fun screenToModel(screenPx: Int, offsetVal: Double, isZ: Boolean = false): Double {
         return if (isZ) {
             // screenPx = (offsetVal - modelZ) * scale * pixelsPerCm
-            // screenPx / (scale * pixelsPerCm) = offsetVal - modelZ
             // modelZ = offsetVal - screenPx / (scale * pixelsPerCm)
             offsetVal - (screenPx / (scale * pixelsPerCm))
         } else {
-            (screenPx / (scale * pixelsPerCm)) - offsetVal
+            if (isInverted) {
+                // screenPx = (offsetVal - modelX) * scale * pixelsPerCm
+                // modelX = offsetVal - screenPx / (scale * pixelsPerCm)
+                offsetVal - (screenPx / (scale * pixelsPerCm))
+            } else {
+                // screenPx = (modelX - offsetVal) * scale * pixelsPerCm
+                // modelX = screenPx / (scale * pixelsPerCm) + offsetVal
+                (screenPx / (scale * pixelsPerCm)) + offsetVal
+            }
         }
     }
 

@@ -56,11 +56,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                     val dxScreen = (e.x - lastMouseX).toDouble()
                     val dyScreen = (e.y - lastMouseY).toDouble()
                     
-                    val dxModel = dxScreen / (doc.scale * doc.pixelsPerCm)
-                    val dyModel = dyScreen / (doc.scale * doc.pixelsPerCm)
-
-                    doc.offsetX += dxModel
-                    doc.offsetY += dyModel
+                    doc.pan(dxScreen, dyScreen)
                     
                     lastMouseX = e.x
                     lastMouseY = e.y
@@ -73,13 +69,12 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 val dx = (e.x - lastMouseX) / (doc.scale * doc.pixelsPerCm)
                 val dz = -(e.y - lastMouseY) / (doc.scale * doc.pixelsPerCm)
                 
-                var newX = dp.x + dx
+                var newX = if (doc.isInverted) dp.x - dx else dp.x + dx
                 var newZ = dp.z + dz
                 
                 // Constraints
-                val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
                 val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
-                newX = newX.coerceIn(0.0, wallWidth)
+                newX = newX.coerceIn(doc.wallStart, doc.wallEnd)
                 newZ = newZ.coerceIn(0.0, wallHeight)
                 
                 // Sticky behavior
@@ -107,17 +102,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             val centerX = this.width / 2.0
             val centerY = this.height / 2.0
             
-            // Logical point under center before zoom
-            val modelCenterX = doc.screenToModel(centerX.toInt(), doc.offsetX)
-            val modelCenterY = doc.screenToModel(centerY.toInt(), doc.offsetY, true)
-
             val rotation = e.preciseWheelRotation
             val factor = 1.1.pow(-rotation)
-            doc.scale = (doc.scale * factor).coerceIn(doc.MIN_SCALE, doc.MAX_SCALE)
-
-            // Adjust offsets to zoom towards center position
-            doc.offsetX = centerX / (doc.scale * doc.pixelsPerCm) - modelCenterX
-            doc.offsetY = centerY / (doc.scale * doc.pixelsPerCm) + modelCenterY
+            doc.zoom(factor, centerX, centerY)
 
             repaint()
         }
@@ -127,22 +114,20 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val menu = JPopupMenu()
         val addPointItem = JMenuItem("Add point")
         addPointItem.addActionListener {
-            val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
+            val wallWidth = (doc.wallEnd - doc.wallStart)
             val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
             
-        val modelX = doc.screenToModel(e.x, doc.offsetX).coerceIn(0.0, wallWidth)
-        val modelZ = doc.screenToModel(e.y, doc.offsetY, true).coerceIn(0.0, wallHeight)
-        doc.layout.points.add(WallLayoutPoint(modelX, modelZ, 0))
+            val modelX = doc.screenToModel(e.x, doc.offsetX).coerceIn(doc.wallStart, doc.wallEnd)
+            val modelZ = doc.screenToModel(e.y, doc.offsetY, true).coerceIn(0.0, wallHeight)
+            doc.layout.points.add(WallLayoutPoint(modelX, modelZ, 0))
             doc.saveState()
             repaint()
         }
         menu.add(addPointItem)
 
-        val modelX = doc.screenToModel(e.x, doc.offsetX)
-        val modelZ = doc.screenToModel(e.y, doc.offsetY)
         val pointUnderMouse = doc.layout.points.find { p ->
             val sx = doc.modelToScreen(p.x, doc.offsetX)
-            val sy = doc.modelToScreen(p.z, doc.offsetY)
+            val sy = doc.modelToScreen(p.z, doc.offsetY, true)
             abs(sx - e.x) <= pointRadius && abs(sy - e.y) <= pointRadius
         }
 
@@ -177,18 +162,17 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val pointsByKind = doc.layout.points.groupBy { it.kind }
         if (pointsByKind.isEmpty()) return
 
-        val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
         val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
 
         val openings = doc.floorPlanDoc.elements.filter { it is PlanWindow || it is Door }
             .filter { doc.floorPlanDoc.findContainingWall(it.x, it.y, it.width, it.height) === doc.wall }
             .map { op ->
-                val isVertical = doc.wall.width < doc.wall.height
-                val relPos = if (isVertical) op.y - doc.wall.y else op.x - doc.wall.x
+                val isVertical = doc.isVertical
+                val absPos = if (isVertical) op.y else op.x
                 val opWidth = if (isVertical) op.height else op.width
                 val opHeight3D = if (op is PlanWindow) op.height3D else (op as Door).verticalHeight
                 val sillElevation = if (op is PlanWindow) op.sillElevation else 0
-                Rectangle2D.Double(relPos.toDouble(), sillElevation.toDouble(), opWidth.toDouble(), opHeight3D.toDouble())
+                Rectangle2D.Double(absPos.toDouble(), sillElevation.toDouble(), opWidth.toDouble(), opHeight3D.toDouble())
             }
 
         for ((kindIdx, points) in pointsByKind) {
@@ -199,7 +183,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             
             val edges = calculateManhattanMST(points)
             for (edge in edges) {
-                drawObstacleAvoidingPath(g2, edge.first, edge.second, openings, wallWidth, wallHeight)
+                drawObstacleAvoidingPath(g2, edge.first, edge.second, openings, doc.wallStart, doc.wallEnd, wallHeight)
             }
         }
     }
@@ -209,11 +193,12 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         p1: WallLayoutPoint,
         p2: WallLayoutPoint,
         openings: List<Rectangle2D.Double>,
-        wallWidth: Double,
+        wallStart: Double,
+        wallEnd: Double,
         wallHeight: Double
     ) {
         // Collect all relevant X and Z coordinates for the Hanan grid
-        val xCoords = mutableSetOf(0.0, wallWidth, p1.x, p2.x)
+        val xCoords = mutableSetOf(wallStart, wallEnd, p1.x, p2.x)
         val zCoords = mutableSetOf(0.0, wallHeight, p1.z, p2.z)
         
         for (op in openings) {
@@ -223,7 +208,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             zCoords.add(op.y + op.height)
         }
         
-        val sortedX = xCoords.filter { it in 0.0..wallWidth }.sorted()
+        val sortedX = xCoords.filter { it in wallStart..wallEnd }.sorted()
         val sortedZ = zCoords.filter { it in 0.0..wallHeight }.sorted()
         
         // A* algorithm on the Hanan grid
@@ -405,7 +390,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
 
     private fun drawAxes(g2: Graphics2D) {
         val axisX = doc.modelToScreen(0.0, doc.offsetX)
-        val axisY = doc.modelToScreen(0.0, doc.offsetY) // This corresponds to Z=0 in model
+        val axisY = doc.modelToScreen(0.0, doc.offsetY, true) // This corresponds to Z=0 in model
         
         val w = width
         val h = height
@@ -428,26 +413,32 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val step = 100 // every 100cm
 
         // X axis ticks
-        var startX = (floor(doc.screenToModel(0, doc.offsetX) / step) * step).roundToInt()
-        while (doc.modelToScreen(startX.toDouble(), doc.offsetX) < w) {
+        val m0 = doc.screenToModel(0, doc.offsetX)
+        val mw = doc.screenToModel(w, doc.offsetX)
+        val minM = minOf(m0, mw)
+        val maxM = maxOf(m0, mw)
+        
+        var startX = (floor(minM / step) * step).roundToInt()
+        while (startX <= maxM) {
             val sx = doc.modelToScreen(startX.toDouble(), doc.offsetX)
-            if (sx >= 0) {
+            if (sx in 0..w) {
                 g2.drawLine(sx, axisY - 5, sx, axisY + 5)
-                if (startX != 0) {
-                    val label = if (abs(startX) % 100 == 0) "${startX / 100}m" else "${startX}cm"
-                    g2.drawString(label, sx + 2, axisY - 2)
-                } else {
-                    g2.drawString("0", sx + 2, axisY - 2)
-                }
+                val label = if (startX == 0) "0" else if (abs(startX) % 100 == 0) "${startX / 100}m" else "${startX}cm"
+                g2.drawString(label, sx + 2, axisY - 2)
             }
             startX += step
         }
 
         // Z axis ticks (vertical axis, like Y in floor plan)
-        var startZ = (floor(doc.screenToModel(h, doc.offsetY, true) / step) * step).roundToInt()
-        while (doc.modelToScreen(startZ.toDouble(), doc.offsetY, true) > 0) {
+        val mz0 = doc.screenToModel(0, doc.offsetY, true)
+        val mzh = doc.screenToModel(h, doc.offsetY, true)
+        val minZ = minOf(mz0, mzh)
+        val maxZ = maxOf(mz0, mzh)
+
+        var startZ = (floor(minZ / step) * step).roundToInt()
+        while (startZ <= maxZ) {
             val sy = doc.modelToScreen(startZ.toDouble(), doc.offsetY, true)
-            if (sy < h) {
+            if (sy in 0..h) {
                 g2.drawLine(axisX - 5, sy, axisX + 5, sy)
                 if (startZ != 0) {
                     val label = if (abs(startZ) % 100 == 0) "${startZ / 100}m" else "${startZ}cm"
@@ -466,70 +457,95 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         g2.stroke = stroke
         g2.color = Color(220, 220, 220)
 
-        var x = (floor(doc.screenToModel(0, doc.offsetX) / gridSize) * gridSize)
-        while (doc.modelToScreen(x, doc.offsetX) < this.width) {
+        val w = width
+        val h = height
+
+        val m0 = doc.screenToModel(0, doc.offsetX)
+        val mw = doc.screenToModel(w, doc.offsetX)
+        val minM = minOf(m0, mw)
+        val maxM = maxOf(m0, mw)
+
+        var x = (floor(minM / gridSize) * gridSize)
+        while (x <= maxM) {
             val sx = doc.modelToScreen(x, doc.offsetX)
-            g2.drawLine(sx, 0, sx, this.height)
+            if (sx in 0..w) {
+                g2.drawLine(sx, 0, sx, h)
+            }
             x += gridSize
         }
 
-        var y = (floor(doc.screenToModel(this.height, doc.offsetY, true) / gridSize) * gridSize)
-        while (doc.modelToScreen(y, doc.offsetY, true) > 0) {
+        val mz0 = doc.screenToModel(0, doc.offsetY, true)
+        val mzh = doc.screenToModel(h, doc.offsetY, true)
+        val minZ = minOf(mz0, mzh)
+        val maxZ = maxOf(mz0, mzh)
+
+        var y = (floor(minZ / gridSize) * gridSize)
+        while (y <= maxZ) {
             val sy = doc.modelToScreen(y, doc.offsetY, true)
-            g2.drawLine(0, sy, this.width, sy)
+            if (sy in 0..h) {
+                g2.drawLine(0, sy, w, sy)
+            }
             y += gridSize
         }
         g2.stroke = BasicStroke(1f)
     }
 
     private fun drawWallBackground(g2: Graphics2D) {
-        val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
         val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
         
-        val x = doc.modelToScreen(0.0, doc.offsetX)
-        val z = doc.modelToScreen(wallHeight, doc.offsetY, true) // Top of wall in Z-up is wallHeight
-        val w = (wallWidth * doc.scale * doc.pixelsPerCm).roundToInt()
-        val h = (wallHeight * doc.scale * doc.pixelsPerCm).roundToInt()
+        val x1 = doc.modelToScreen(doc.wallStart, doc.offsetX)
+        val x2 = doc.modelToScreen(doc.wallEnd, doc.offsetX)
+        val z1 = doc.modelToScreen(0.0, doc.offsetY, true)
+        val z2 = doc.modelToScreen(wallHeight, doc.offsetY, true)
+        
+        val rx = minOf(x1, x2)
+        val rz = minOf(z1, z2)
+        val rw = abs(x1 - x2)
+        val rh = abs(z1 - z2)
         
         g2.color = Color.LIGHT_GRAY
-        g2.fillRect(x, z, w, h)
+        g2.fillRect(rx, rz, rw, rh)
 
         drawOpenings(g2, wallHeight)
         drawPerpendicularWalls(g2, wallHeight)
 
         g2.color = Color.GRAY
-        g2.drawRect(x, z, w, h)
+        g2.drawRect(rx, rz, rw, rh)
     }
 
     private fun drawOpenings(g2: Graphics2D, wallHeight: Double) {
-        val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
-        val isVertical = doc.wall.width < doc.wall.height
+        val isVertical = doc.isVertical
         val openings = doc.floorPlanDoc.elements.filter { it is PlanWindow || it is Door }
         
         for (op in openings) {
             val opWall = doc.floorPlanDoc.findContainingWall(op.x, op.y, op.width, op.height)
             if (opWall === doc.wall) {
-                val relPos = if (isVertical) op.y - doc.wall.y else op.x - doc.wall.x
+                val absPos = if (isVertical) op.y else op.x
                 val opWidth = if (isVertical) op.height else op.width
                 val opHeight3D = if (op is PlanWindow) op.height3D else (op as Door).verticalHeight
                 val sillElevation = if (op is PlanWindow) op.sillElevation else 0
                 
-                val ox = doc.modelToScreen(relPos.toDouble(), doc.offsetX)
+                val x1 = doc.modelToScreen(absPos.toDouble(), doc.offsetX)
+                val x2 = doc.modelToScreen((absPos + opWidth).toDouble(), doc.offsetX)
                 val topZ = (sillElevation + opHeight3D).toDouble()
-                val oz = doc.modelToScreen(topZ, doc.offsetY, true)
-                val ow = (opWidth * doc.scale * doc.pixelsPerCm).roundToInt()
-                val oh = (opHeight3D * doc.scale * doc.pixelsPerCm).roundToInt()
+                val z1 = doc.modelToScreen(sillElevation.toDouble(), doc.offsetY, true)
+                val z2 = doc.modelToScreen(topZ, doc.offsetY, true)
+
+                val rx = minOf(x1, x2)
+                val rz = minOf(z1, z2)
+                val rw = abs(x1 - x2)
+                val rh = abs(z1 - z2)
                 
                 g2.color = Color.WHITE
-                g2.fillRect(ox, oz, ow, oh)
+                g2.fillRect(rx, rz, rw, rh)
                 g2.color = Color.GRAY
-                g2.drawRect(ox, oz, ow, oh)
+                g2.drawRect(rx, rz, rw, rh)
             }
         }
     }
 
     private fun drawPerpendicularWalls(g2: Graphics2D, wallHeight: Double) {
-        val isVertical = doc.wall.width < doc.wall.height
+        val isVertical = doc.isVertical
         val otherWalls = doc.floorPlanDoc.elements.filterIsInstance<Wall>().filter { it !== doc.wall }
         
         val wallBounds = doc.wall.getBounds()
@@ -557,9 +573,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                         if (docksToEditedSide) {
                             val overlapStart = maxOf(wallBounds.y, otherBounds.y)
                             val overlapEnd = minOf(wallBounds.y + wallBounds.height, otherBounds.y + otherBounds.height)
+                            val absPos = (overlapStart + overlapEnd) / 2.0
                             val thickness = (overlapEnd - overlapStart).toDouble()
-                            val relPos = overlapStart + thickness / 2.0 - wallBounds.y
-                            drawPerpWallSection(g2, relPos, wallHeight, thickness)
+                            drawPerpWallSection(g2, absPos, wallHeight, thickness)
                         }
                     }
                 } else {
@@ -578,9 +594,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                         if (docksToEditedSide) {
                             val overlapStart = maxOf(wallBounds.x, otherBounds.x)
                             val overlapEnd = minOf(wallBounds.x + wallBounds.width, otherBounds.x + otherBounds.width)
+                            val absPos = (overlapStart + overlapEnd) / 2.0
                             val thickness = (overlapEnd - overlapStart).toDouble()
-                            val relPos = overlapStart + thickness / 2.0 - wallBounds.x
-                            drawPerpWallSection(g2, relPos, wallHeight, thickness)
+                            drawPerpWallSection(g2, absPos, wallHeight, thickness)
                         }
                     }
                 }
@@ -588,22 +604,27 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         }
     }
 
-    private fun drawPerpWallSection(g2: Graphics2D, relPos: Double, wallHeight: Double, thickness: Double) {
-        val sx = doc.modelToScreen(relPos - thickness / 2.0, doc.offsetX)
-        val sz = doc.modelToScreen(wallHeight, doc.offsetY, true)
-        val sw = (thickness * doc.scale * doc.pixelsPerCm).roundToInt()
-        val sh = (wallHeight * doc.scale * doc.pixelsPerCm).roundToInt()
+    private fun drawPerpWallSection(g2: Graphics2D, absPos: Double, wallHeight: Double, thickness: Double) {
+        val x1 = doc.modelToScreen(absPos - thickness / 2.0, doc.offsetX)
+        val x2 = doc.modelToScreen(absPos + thickness / 2.0, doc.offsetX)
+        val z1 = doc.modelToScreen(0.0, doc.offsetY, true)
+        val z2 = doc.modelToScreen(wallHeight, doc.offsetY, true)
+        
+        val rx = minOf(x1, x2)
+        val rz = minOf(z1, z2)
+        val rw = abs(x1 - x2)
+        val rh = abs(z1 - z2)
         
         g2.color = Color.GRAY
-        g2.fillRect(sx, sz, sw, sh)
+        g2.fillRect(rx, rz, rw, rh)
         g2.color = Color.DARK_GRAY
-        g2.drawRect(sx, sz, sw, sh)
+        g2.drawRect(rx, rz, rw, rh)
     }
 
     private fun drawRuler(g2: Graphics2D) {
-        val wallWidth = maxOf(doc.wall.width, doc.wall.height).toDouble()
-        val xStart = doc.modelToScreen(0.0, doc.offsetX)
-        val xEnd = doc.modelToScreen(wallWidth, doc.offsetX)
+        val wallWidth = (doc.wallEnd - doc.wallStart)
+        val xStart = doc.modelToScreen(doc.wallStart, doc.offsetX)
+        val xEnd = doc.modelToScreen(doc.wallEnd, doc.offsetX)
         val y = doc.modelToScreen(-10.0, doc.offsetY, true) // Ruler below floor (Z=-10)
         
         g2.color = Color.BLACK
