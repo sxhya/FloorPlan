@@ -84,13 +84,18 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                     if (abs(p.x - newX) < threshold) newX = p.x
                     if (abs(p.z.toDouble() - newZ) < threshold) newZ = p.z.toDouble()
                 }
+
+                val perpEdges = getPerpendicularWallEdges()
+                for (edgeX in perpEdges) {
+                    if (abs(edgeX - newX) < threshold) newX = edgeX
+                }
                 
                 dp.x = newX
                 dp.z = newZ.roundToInt()
                 
                 lastMouseX = e.x
                 lastMouseY = e.y
-                repaint()
+                doc.app.repaintAllCanvases()
                 doc.app.sidePanel.updateFieldsForActiveDocument()
             }
         }
@@ -145,6 +150,97 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         menu.show(this, e.x, e.y)
     }
 
+    private fun getPerpendicularWallEdges(): List<Double> {
+        val edges = mutableListOf<Double>()
+        val isVertical = doc.isVertical
+        val otherWalls = doc.floorPlanDoc.elements.filterIsInstance<Wall>().filter { it !== doc.wall }
+        val wallBounds = doc.wall.getBounds()
+
+        for (other in otherWalls) {
+            val otherBounds = other.getBounds()
+            val otherIsVertical = other.width < other.height
+            if (isVertical != otherIsVertical) {
+                if (isVertical) {
+                    if (otherBounds.y < wallBounds.y + wallBounds.height && otherBounds.y + otherBounds.height > wallBounds.y) {
+                        val docksToEditedSide = if (doc.isFront) {
+                            otherBounds.x + otherBounds.width == wallBounds.x
+                        } else {
+                            otherBounds.x == wallBounds.x + wallBounds.width
+                        }
+                        if (docksToEditedSide) {
+                            val overlapStart = maxOf(wallBounds.y, otherBounds.y)
+                            val overlapEnd = minOf(wallBounds.y + wallBounds.height, otherBounds.y + otherBounds.height)
+                            edges.add(overlapStart.toDouble())
+                            edges.add(overlapEnd.toDouble())
+                        }
+                    }
+                } else {
+                    if (otherBounds.x < wallBounds.x + wallBounds.width && otherBounds.x + otherBounds.width > wallBounds.x) {
+                        val docksToEditedSide = if (doc.isFront) {
+                            otherBounds.y + otherBounds.height == wallBounds.y
+                        } else {
+                            otherBounds.y == wallBounds.y + wallBounds.height
+                        }
+                        if (docksToEditedSide) {
+                            val overlapStart = maxOf(wallBounds.x, otherBounds.x)
+                            val overlapEnd = minOf(wallBounds.x + wallBounds.width, otherBounds.x + otherBounds.width)
+                            edges.add(overlapStart.toDouble())
+                            edges.add(overlapEnd.toDouble())
+                        }
+                    }
+                }
+            }
+        }
+        return edges
+    }
+
+    private fun getDockedPoints(): List<WallLayoutPoint> {
+        val dockedPoints = mutableListOf<WallLayoutPoint>()
+        val wall = doc.wall
+        val isFront = doc.isFront
+        val isVertical = doc.isVertical
+        
+        // Define the line segment of the current wall side in floor plan
+        val wallSideX = if (isVertical) (if (isFront) wall.x else wall.x + wall.width).toDouble() else 0.0
+        val wallSideY = if (!isVertical) (if (isFront) wall.y else wall.y + wall.height).toDouble() else 0.0
+        
+        val wallStart = if (isVertical) wall.y.toDouble() else wall.x.toDouble()
+        val wallEnd = if (isVertical) (wall.y + wall.height).toDouble() else (wall.x + wall.width).toDouble()
+
+        val otherWalls = doc.floorPlanDoc.elements.filterIsInstance<Wall>().filter { it !== wall }
+
+        for (other in otherWalls) {
+            val layouts = listOf(true to other.frontLayout, false to other.backLayout)
+            for ((otherIsFront, layout) in layouts) {
+                for (p in layout.points) {
+                    val fp = other.getFloorPlanCoords(p, otherIsFront)
+                    
+                    // Check if this floor plan point lies on the current wall's face segment
+                    val onSegment = if (isVertical) {
+                        abs(fp.x - wallSideX) < 1e-6 && fp.y >= wallStart - 1e-6 && fp.y <= wallEnd + 1e-6
+                    } else {
+                        abs(fp.y - wallSideY) < 1e-6 && fp.x >= wallStart - 1e-6 && fp.x <= wallEnd + 1e-6
+                    }
+
+                    if (onSegment) {
+                        // The coordinate along the current wall's layout is fp.y if vertical, fp.x if horizontal
+                        val layoutX = if (isVertical) fp.y else fp.x
+                        
+                        // Avoid duplicates if the point is already in doc.layout.points
+                        val alreadyExists = doc.layout.points.any { 
+                            abs(it.x - layoutX) < 1e-6 && it.z == p.z && it.kind == p.kind 
+                        }
+                        
+                        if (!alreadyExists) {
+                            dockedPoints.add(WallLayoutPoint(layoutX, p.z, p.kind))
+                        }
+                    }
+                }
+            }
+        }
+        return dockedPoints
+    }
+
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)
         val g2 = g as Graphics2D
@@ -159,7 +255,8 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
     }
 
     private fun drawConnections(g2: Graphics2D) {
-        val pointsByKind = doc.layout.points.groupBy { it.kind }
+        val allPoints = doc.layout.points + getDockedPoints()
+        val pointsByKind = allPoints.groupBy { it.kind }
         if (pointsByKind.isEmpty()) return
 
         val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
@@ -653,6 +750,27 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 g2.drawOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
                 g2.stroke = BasicStroke(1f)
             }
+        }
+
+        // Draw docked points
+        val dockedPoints = getDockedPoints()
+        g2.font = Font("SansSerif", Font.PLAIN, 10)
+        for (p in dockedPoints) {
+            val sx = doc.modelToScreen(p.x, doc.offsetX)
+            val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
+
+            val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
+            val baseColor = kind?.color ?: Color.BLACK
+            // Use semi-transparent color for docked points
+            g2.color = Color(baseColor.red, baseColor.green, baseColor.blue, 128)
+            
+            g2.fillOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
+            
+            // Draw label "docked"
+            g2.color = Color.GRAY
+            val label = "docked"
+            val fm = g2.fontMetrics
+            g2.drawString(label, sx - fm.stringWidth(label) / 2, sy - pointRadius - 5)
         }
     }
 }

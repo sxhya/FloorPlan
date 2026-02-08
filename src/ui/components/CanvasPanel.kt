@@ -1154,7 +1154,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             }
 
             if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && firstUtilityPoint != null && currentUtilityMousePos != null) {
-                val p1 = getFloorPlanCoords(firstUtilityPoint!!, firstUtilityWall!!, firstUtilityIsFront)
+                val p1 = firstUtilityWall!!.getFloorPlanCoords(firstUtilityPoint!!, firstUtilityIsFront)
                 val s1x = doc.modelToScreen(p1.x, doc.offsetX)
                 val s1y = doc.modelToScreen(p1.y, doc.offsetY)
 
@@ -1605,8 +1605,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     val conn = el as UtilitiesConnection
                     if (conn.kind !in doc.visibleKinds && doc.currentMode != AppMode.UTILITY_CONNECTION_ADDING) return
                     
-                    val p1 = conn.getFloorPlanCoords(conn.startPoint, conn.startWall, conn.startIsFront)
-                    val p2 = conn.getFloorPlanCoords(conn.endPoint, conn.endWall, conn.endIsFront)
+                    val p1 = conn.startWall.getFloorPlanCoords(conn.startPoint, conn.startIsFront)
+                    val p2 = conn.endWall.getFloorPlanCoords(conn.endPoint, conn.endIsFront)
                     
                     val s1x = doc.modelToScreen(p1.x, doc.offsetX)
                     val s1y = doc.modelToScreen(p1.y, doc.offsetY)
@@ -1629,7 +1629,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             layout.points.forEach { p ->
                 val isAddingThisKind = doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && p.kind == doc.addingUtilityKind
                 if (p.kind in doc.visibleKinds || isAddingThisKind) {
-                    val coords = getFloorPlanCoords(p, wall, isFront)
+                    val coords = wall.getFloorPlanCoords(p, isFront)
                     val sx = doc.modelToScreen(coords.x, doc.offsetX)
                     val sy = doc.modelToScreen(coords.y, doc.offsetY)
 
@@ -1657,7 +1657,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
         private fun findPointInLayout(p: Point, wall: Wall, layout: WallLayout, isFront: Boolean): WallLayoutPoint? {
             val r = 10 // selection radius
             for (wp in layout.points) {
-                val coords = getFloorPlanCoords(wp, wall, isFront)
+                val coords = wall.getFloorPlanCoords(wp, isFront)
                 val sx = doc.modelToScreen(coords.x, doc.offsetX)
                 val sy = doc.modelToScreen(coords.y, doc.offsetY)
                 if (abs(sx - p.x) <= r && abs(sy - p.y) <= r) return wp
@@ -1665,16 +1665,6 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             return null
         }
 
-        private fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): java.awt.geom.Point2D.Double {
-            val isVertical = wall.width < wall.height
-            return if (isVertical) {
-                val fx = if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
-                java.awt.geom.Point2D.Double(fx, p.x)
-            } else {
-                val fy = if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
-                java.awt.geom.Point2D.Double(p.x, fy)
-            }
-        }
 
         private fun drawSelection(g2: Graphics2D, sx: Int, sy: Int, sw: Int, sh: Int) {
             val selectionColor = if (doc.app.activeWindow == doc.window) Color.RED else Color.GRAY
@@ -1682,8 +1672,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             g2.setStroke(BasicStroke(2f))
             if (doc.selectedElement is UtilitiesConnection) {
                 val conn = doc.selectedElement as UtilitiesConnection
-                val p1 = getFloorPlanCoords(conn.startPoint, conn.startWall, conn.startIsFront)
-                val p2 = getFloorPlanCoords(conn.endPoint, conn.endWall, conn.endIsFront)
+                val p1 = conn.startWall.getFloorPlanCoords(conn.startPoint, conn.startIsFront)
+                val p2 = conn.endWall.getFloorPlanCoords(conn.endPoint, conn.endIsFront)
                 
                 val s1x = doc.modelToScreen(p1.x, doc.offsetX)
                 val s1y = doc.modelToScreen(p1.y, doc.offsetY)

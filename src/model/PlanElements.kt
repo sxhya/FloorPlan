@@ -39,6 +39,17 @@ abstract class PlanElement(
 class Wall(x: Int, y: Int, width: Int, height: Int) : PlanElement(x, y, width, height, ElementType.WALL) {
     val frontLayout = WallLayout()
     val backLayout = WallLayout()
+
+    fun getFloorPlanCoords(p: WallLayoutPoint, isFront: Boolean): Point2D.Double {
+        val isVertical = width < height
+        return if (isVertical) {
+            val fx = if (isFront) x.toDouble() else (x + width).toDouble()
+            Point2D.Double(fx, p.x)
+        } else {
+            val fy = if (isFront) y.toDouble() else (y + height).toDouble()
+            Point2D.Double(p.x, fy)
+        }
+    }
 }
 class Room(x: Int, y: Int, width: Int, height: Int, var floorThickness: Int = 15, var zOffset: Int = 0) : PlanElement(x, y, width, height, ElementType.ROOM)
 class Window(x: Int, y: Int, width: Int, height: Int, var height3D: Int = 150, var sillElevation: Int = 90, var windowPosition: WindowPosition = WindowPosition.XY) : PlanElement(x, y, width, height, ElementType.WINDOW)
@@ -60,8 +71,8 @@ class UtilitiesConnection(
     }
 
     fun updateBounds() {
-        val p1 = getFloorPlanCoords(startPoint, startWall, startIsFront)
-        val p2 = getFloorPlanCoords(endPoint, endWall, endIsFront)
+        val p1 = startWall.getFloorPlanCoords(startPoint, startIsFront)
+        val p2 = endWall.getFloorPlanCoords(endPoint, endIsFront)
 
         val minX = Math.min(p1.x, p2.x).toInt()
         val minY = Math.min(p1.y, p2.y).toInt()
@@ -74,20 +85,9 @@ class UtilitiesConnection(
         height = Math.max(1, maxY - minY)
     }
 
-    fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): Point2D.Double {
-        val isVertical = wall.width < wall.height
-        return if (isVertical) {
-            val fx = if (isFront) wall.x.toDouble() else (wall.x + wall.width).toDouble()
-            Point2D.Double(fx, p.x)
-        } else {
-            val fy = if (isFront) wall.y.toDouble() else (wall.y + wall.height).toDouble()
-            Point2D.Double(p.x, fy)
-        }
-    }
-
     override fun contains(px: Int, py: Int): Boolean {
-        val p1 = getFloorPlanCoords(startPoint, startWall, startIsFront)
-        val p2 = getFloorPlanCoords(endPoint, endWall, endIsFront)
+        val p1 = startWall.getFloorPlanCoords(startPoint, startIsFront)
+        val p2 = endWall.getFloorPlanCoords(endPoint, endIsFront)
 
         val dist = Line2D.ptSegDist(p1.x, p1.y, p2.x, p2.y, px.toDouble(), py.toDouble())
         return dist < 10.0
