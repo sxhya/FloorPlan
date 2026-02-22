@@ -1290,6 +1290,12 @@ class FloorPlanApp {
             currentZ += floorHeight
         }
 
+        var utilZ = 0.0
+        for (floor in floors) {
+            addUtilityCylinders(model3d, floor.doc.elements, floor.doc.kinds, utilZ, floor.height.toDouble())
+            utilZ += floor.height.toDouble()
+        }
+
         doc3d.model = model3d
         doc3d.isModified = true
         threeDDocuments.add(doc3d)
@@ -1497,6 +1503,17 @@ class FloorPlanApp {
                     val floorDoc = FloorPlanDocument(this)
                     floorDoc.elements.addAll(floorElements)
                     floorDoc.currentFile = floorFile
+                    val floorKindNodes = floorXmlDoc.getElementsByTagName("Kind")
+                    if (floorKindNodes.length > 0) {
+                        floorDoc.kinds.clear()
+                        for (ki in 0 until floorKindNodes.length) {
+                            val ke = floorKindNodes.item(ki) as Element
+                            val kName = ke.getAttribute("name")
+                            val kColor = Color(ke.getAttribute("color").toInt())
+                            val kDiameter = if (ke.hasAttribute("diameter")) ke.getAttribute("diameter").toDouble() else 1.0
+                            floorDoc.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
+                        }
+                    }
                     floors.add(FloorInfo(floorDoc, floorData.height))
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -1968,7 +1985,13 @@ class FloorPlanApp {
             }
             currentZ += floorHeight
         }
-        
+
+        var utilZ = 0.0
+        for (floor in floors) {
+            addUtilityCylinders(model3d, floor.doc.elements, floor.doc.kinds, utilZ, floor.height.toDouble())
+            utilZ += floor.height.toDouble()
+        }
+
         return model3d
     }
 
@@ -1982,18 +2005,120 @@ class FloorPlanApp {
         }
     }
 
+    internal fun clearOtherSelections(exceptFloorPlan: FloorPlanDocument? = null, exceptWallLayout: WallLayoutDocument? = null) {
+        documents.forEach { doc ->
+            if (doc !== exceptFloorPlan && doc.selectedElement != null) {
+                doc.selectedElement = null
+                doc.canvas.repaint()
+            }
+        }
+        for (w in Window.getWindows()) {
+            if (w is WallLayoutWindow && w.doc !== exceptWallLayout && w.doc.selectedPoint != null) {
+                w.doc.selectedPoint = null
+                w.canvas.repaint()
+            }
+        }
+    }
+
+    private fun addUtilityCylinders(
+        model3d: model.Model3D,
+        floorElements: List<PlanElement>,
+        kinds: List<WallLayoutKind>,
+        currentZ: Double,
+        floorHeight: Double
+    ) {
+        val allWalls = floorElements.filterIsInstance<Wall>()
+        val openingElements = floorElements.filter { it is PlanWindow || it is Door }
+
+        for (el in floorElements) {
+            when (el) {
+                is Wall -> {
+                    val isVertical = el.width < el.height
+                    val wallStart = if (isVertical) el.y.toDouble() else el.x.toDouble()
+                    val wallEnd = if (isVertical) (el.y + el.height).toDouble() else (el.x + el.width).toDouble()
+                    val wallBounds = el.getBounds()
+
+                    // Filter openings to only those on this wall
+                    val wallOpenings = openingElements.filter { wallBounds.contains(it.getBounds()) }
+                    val openings = WallLayoutCanvas.buildOpeningsForWall(el, isVertical, wallOpenings)
+
+                    fun waypoint3D(layoutX: Double, layoutZ: Double, isFront: Boolean): Vector3D {
+                        return if (isVertical) {
+                            val wallX = if (isFront) el.x.toDouble() else (el.x + el.width).toDouble()
+                            Vector3D(wallX, layoutX, currentZ + layoutZ)
+                        } else {
+                            val wallY = if (isFront) el.y.toDouble() else (el.y + el.height).toDouble()
+                            Vector3D(layoutX, wallY, currentZ + layoutZ)
+                        }
+                    }
+
+                    fun addLayoutCylinders(layout: WallLayout, isFront: Boolean) {
+                        val dockedPoints = WallLayoutCanvas.computeDockedPoints(el, isFront, allWalls)
+                        val allPoints = layout.points + dockedPoints
+                        val pointsByKind = allPoints.groupBy { it.kind }
+                        for ((kindIdx, pts) in pointsByKind) {
+                            if (pts.size < 2) continue
+                            val kind = kinds.getOrNull(kindIdx) ?: continue
+                            val radius = kind.diameter / 2.0
+                            val color = kind.color
+                            for ((p1, p2) in WallLayoutCanvas.computeManhattanMST(pts)) {
+                                val waypoints = WallLayoutCanvas.computeOrthogonalPath(
+                                    p1, p2, openings, wallStart, wallEnd, floorHeight)
+                                for (i in 0 until waypoints.size - 1) {
+                                    val (lx1, lz1) = waypoints[i]
+                                    val (lx2, lz2) = waypoints[i + 1]
+                                    if (kotlin.math.abs(lx1 - lx2) > 0.001 || kotlin.math.abs(lz1 - lz2) > 0.001) {
+                                        model3d.cylinders.add(Cylinder3D(
+                                            waypoint3D(lx1, lz1, isFront),
+                                            waypoint3D(lx2, lz2, isFront),
+                                            radius, color
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                        // Add 3D labels for named points
+                        for (p in layout.points) {
+                            if (p.name.isNotEmpty()) {
+                                val pos = waypoint3D(p.x, p.z.toDouble(), isFront)
+                                val color = kinds.getOrNull(p.kind)?.color ?: java.awt.Color.WHITE
+                                model3d.labels.add(Label3D(pos, p.name, color))
+                            }
+                        }
+                    }
+
+                    addLayoutCylinders(el.frontLayout, true)
+                    addLayoutCylinders(el.backLayout, false)
+                }
+                is UtilitiesConnection -> {
+                    val kind = kinds.getOrNull(el.kind) ?: continue
+                    val radius = kind.diameter / 2.0
+                    val color = kind.color
+                    val startFP = el.startWall.getFloorPlanCoords(el.startPoint, el.startIsFront)
+                    val endFP = el.endWall.getFloorPlanCoords(el.endPoint, el.endIsFront)
+                    model3d.cylinders.add(Cylinder3D(
+                        Vector3D(startFP.x, startFP.y, currentZ + el.startPoint.z),
+                        Vector3D(endFP.x, endFP.y, currentZ + el.endPoint.z),
+                        radius, color
+                    ))
+                }
+                else -> {}
+            }
+        }
+    }
+
     private fun showManageKindsDialog() {
         val doc = activeDocument ?: return
         val dialog = JDialog(activeWindow, "Manage Wall Layout Kinds", true)
         dialog.layout = BorderLayout()
-        dialog.setSize(400, 350)
+        dialog.setSize(500, 350)
         dialog.setLocationRelativeTo(activeWindow)
 
-        val model = object : DefaultTableModel(arrayOf("Name", "Color"), 0) {
+        val model = object : DefaultTableModel(arrayOf("Name", "Color", "Diameter (cm)"), 0) {
             override fun getColumnClass(columnIndex: Int): Class<*> = if (columnIndex == 1) Color::class.java else String::class.java
         }
         for (kind in doc.kinds) {
-            model.addRow(arrayOf(kind.name, kind.color))
+            model.addRow(arrayOf(kind.name, kind.color, kind.diameter.toString()))
         }
         val table = JTable(model)
         table.putClientProperty("terminateEditOnFocusLost", true)
@@ -2043,7 +2168,7 @@ class FloorPlanApp {
         addBtn.addActionListener {
             val color = JColorChooser.showDialog(dialog, "Choose Kind Color", Color.RED)
             if (color != null) {
-                model.addRow(arrayOf("New Kind", color))
+                model.addRow(arrayOf("New Kind", color, "1.0"))
             }
         }
         val removeBtn = JButton("Remove Kind")
@@ -2062,7 +2187,8 @@ class FloorPlanApp {
             for (i in 0 until model.rowCount) {
                 val name = model.getValueAt(i, 0) as String
                 val color = model.getValueAt(i, 1) as Color
-                doc.kinds.add(WallLayoutKind(name, color))
+                val diameter = model.getValueAt(i, 2).toString().toDoubleOrNull()?.coerceAtLeast(0.1) ?: 1.0
+                doc.kinds.add(WallLayoutKind(name, color, diameter))
             }
             doc.isModified = true
             repaintAllCanvases()
@@ -2195,6 +2321,7 @@ class FloorPlanApp {
                     val kNode = xmlDoc.createElement("Kind")
                     kNode.setAttribute("name", kind.name)
                     kNode.setAttribute("color", kind.color.rgb.toString())
+                    kNode.setAttribute("diameter", kind.diameter.toString())
                     rootElement.appendChild(kNode)
                 }
                 
@@ -2219,6 +2346,7 @@ class FloorPlanApp {
                                     pNode.setAttribute("x", p.x.toString())
                                     pNode.setAttribute("z", p.z.toString())
                                     pNode.setAttribute("kind", p.kind.toString())
+                                    if (p.name.isNotEmpty()) pNode.setAttribute("name", p.name)
                                     layoutNode.appendChild(pNode)
                                 }
                                 elNode.appendChild(layoutNode)
@@ -2327,8 +2455,10 @@ class FloorPlanApp {
                                     val px = pElement.getAttribute("x").toDouble()
                                     val pz = pElement.getAttribute("z").toDouble().roundToInt()
                                     val pk = pElement.getAttribute("kind").toInt()
-                                    layout.points.add(WallLayoutPoint(px, pz, pk))
+                                    val pn = if (pElement.hasAttribute("name")) pElement.getAttribute("name") else ""
+                                    layout.points.add(WallLayoutPoint(px, pz, pk, pn))
                                 }
+                                layout.isAbsolute = true
                             }
                         }
                         parseLayout(wall.frontLayout, "FrontLayout")
@@ -2434,6 +2564,17 @@ class FloorPlanApp {
                         val floorDoc = FloorPlanDocument(this)
                         floorDoc.elements.addAll(floorElements)
                         floorDoc.currentFile = floorFile
+                        val floorKindNodes = floorXmlDoc.getElementsByTagName("Kind")
+                        if (floorKindNodes.length > 0) {
+                            floorDoc.kinds.clear()
+                            for (ki in 0 until floorKindNodes.length) {
+                                val ke = floorKindNodes.item(ki) as Element
+                                val kName = ke.getAttribute("name")
+                                val kColor = Color(ke.getAttribute("color").toInt())
+                                val kDiameter = if (ke.hasAttribute("diameter")) ke.getAttribute("diameter").toDouble() else 1.0
+                                floorDoc.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
+                            }
+                        }
                         floors.add(FloorInfo(floorDoc, height))
                     } else {
                         JOptionPane.showMessageDialog(null, "Floor plan file not found: $path")
@@ -2478,7 +2619,8 @@ class FloorPlanApp {
                     val kElement = kindNodes.item(i) as Element
                     val name = kElement.getAttribute("name")
                     val color = Color(kElement.getAttribute("color").toInt())
-                    doc.kinds.add(WallLayoutKind(name, color))
+                    val diameter = if (kElement.hasAttribute("diameter")) kElement.getAttribute("diameter").toDouble() else 1.0
+                    doc.kinds.add(WallLayoutKind(name, color, diameter))
                 }
             }
 

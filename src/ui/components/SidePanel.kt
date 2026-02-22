@@ -33,7 +33,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             val prop = getValueAt(row, 0)?.toString() ?: return false
             val el = app.activeDocument?.selectedElement
             return when (prop) {
-                "Type", "Element Area", "Opening Area", "Opening Volume", "" -> false
+                "Type", "Element Area", "Opening Area", "Opening Volume", "", "Points count" -> false
                 "Kind" -> if (el is UtilitiesConnection) false else true
                 else -> true
             }
@@ -62,6 +62,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     private var currentThreeDDoc: ThreeDDocument? = null
 
     private var isUpdatingFields = false
+    private var activeWallLayoutDoc: ui.WallLayoutDocument? = null
 
     init {
         layout = BorderLayout()
@@ -69,7 +70,15 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         preferredSize = Dimension(300, 700)
 
         mainFieldsPanel.add(JLabel("Dimension"), BorderLayout.NORTH)
-        mainFieldsPanel.add(JScrollPane(dimensionTable), BorderLayout.CENTER)
+        val dimScrollPane = JScrollPane(dimensionTable)
+        // Stop editing when clicking in the viewport area below all table rows
+        dimScrollPane.viewport.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mousePressed(e: java.awt.event.MouseEvent) {
+                if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+                dimensionTable.clearSelection()
+            }
+        })
+        mainFieldsPanel.add(dimScrollPane, BorderLayout.CENTER)
 
         polygonPanel.add(JLabel("Polygon Vertices"), BorderLayout.NORTH)
         polygonPanel.add(JScrollPane(polygonTable), BorderLayout.CENTER)
@@ -160,6 +169,14 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         }
 
         add(mainFieldsPanel, BorderLayout.CENTER)
+
+        // Stop editing when clicking the panel's padding area (outside all child components)
+        addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mousePressed(e: java.awt.event.MouseEvent) {
+                if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+                dimensionTable.clearSelection()
+            }
+        })
     }
 
     fun addElement(type: ElementType) {
@@ -221,11 +238,18 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
     private fun updateWallLayoutFields(doc: ui.WallLayoutDocument) {
         clearFields()
+        activeWallLayoutDoc = doc
+        // Disable focus-loss auto-commit while wall layout spinners are shown.
+        // Without this, clicking the canvas causes focus to leave the spinner, which
+        // auto-commits the value and shifts the point's model position before mousePressed
+        // runs its hit test, making the point "impossible to grab".
+        dimensionTable.putClientProperty("terminateEditOnFocusLost", false)
         isUpdatingFields = true
         val p = doc.selectedPoint
         if (p != null) {
             dimensionTableModel.addRow(arrayOf("Type", "WallLayoutPoint"))
-            dimensionTableModel.addRow(arrayOf("X", p.x.roundToInt()))
+            dimensionTableModel.addRow(arrayOf("Name", p.name))
+            dimensionTableModel.addRow(arrayOf("X", p.x))
             dimensionTableModel.addRow(arrayOf("Z", p.z))
             val kindName = doc.floorPlanDoc.kinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
             dimensionTableModel.addRow(arrayOf("Kind", kindName))
@@ -399,9 +423,86 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             }
         }
 
-        val defaultEditor = DefaultCellEditor(JTextField())
+        // Custom text field editor: Enter commits directly via the outer (registered) editor,
+        // bypassing DefaultCellEditor's inner editingStopped which the JTable never sees.
+        val defaultTextField = JTextField()
+        val defaultEditor = object : AbstractCellEditor(), TableCellEditor {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                defaultTextField.text = value?.toString() ?: ""
+                return defaultTextField
+            }
+            override fun getCellEditorValue(): Any? = defaultTextField.text
+        }
 
-        dimensionTable.columnModel.getColumn(1).cellEditor = object : AbstractCellEditor(), TableCellEditor {
+        // Spinner for X (Double) — only active when editing a WallLayoutPoint
+        val xSpinner = JSpinner(SpinnerNumberModel(0.0, -99999.0, 99999.0, 1.0))
+        val xSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                xSpinner.value = value?.toString()?.toDoubleOrNull() ?: 0.0
+                return xSpinner
+            }
+            override fun getCellEditorValue(): Any? {
+                try { xSpinner.commitEdit() } catch (e: Exception) { /* keep current value */ }
+                return xSpinner.value
+            }
+        }
+        (xSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
+            try { xSpinner.commitEdit() } catch (e: Exception) { /* ignore */ }
+            if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+            dimensionTable.clearSelection()
+        }
+
+        // Spinner for Z (Int) — only active when editing a WallLayoutPoint
+        val zSpinner = JSpinner(SpinnerNumberModel(0, 0, 9999, 1))
+        val zSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                zSpinner.value = value?.toString()?.toIntOrNull() ?: 0
+                return zSpinner
+            }
+            override fun getCellEditorValue(): Any? {
+                try { zSpinner.commitEdit() } catch (e: Exception) { /* keep current value */ }
+                return zSpinner.value
+            }
+        }
+        (zSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
+            try { zSpinner.commitEdit() } catch (e: Exception) { /* ignore */ }
+            if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+            dimensionTable.clearSelection()
+        }
+
+        // Ensure the table rows are tall enough to fully paint the spinner up/down buttons.
+        // The default row height (16-18px) clips them; use the spinner's own preferred height.
+        dimensionTable.rowHeight = maxOf(dimensionTable.rowHeight, xSpinner.preferredSize.height)
+
+        // Immediately repaint the table when a spinner editor gains focus so the
+        // selected-row highlight updates without waiting for the next Swing repaint pass.
+        val spinnerFocusRepaint = object : java.awt.event.FocusAdapter() {
+            override fun focusGained(e: java.awt.event.FocusEvent) = dimensionTable.repaint()
+        }
+        (xSpinner.editor as JSpinner.DefaultEditor).textField.addFocusListener(spinnerFocusRepaint)
+        (zSpinner.editor as JSpinner.DefaultEditor).textField.addFocusListener(spinnerFocusRepaint)
+
+        // Cap the "Property" column width so the "Value" column gets enough room for comboboxes.
+        dimensionTable.columnModel.getColumn(0).maxWidth = 110
+        dimensionTable.autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
+
+        // Stop editing and clear selection when clicking on a non-editable area of the table:
+        // the Property column (col 0) or empty space below all rows (row == -1).
+        dimensionTable.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mousePressed(e: java.awt.event.MouseEvent) {
+                val row = dimensionTable.rowAtPoint(e.point)
+                val col = dimensionTable.columnAtPoint(e.point)
+                if (row == -1 || col == 0) {
+                    if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+                    dimensionTable.clearSelection()
+                }
+            }
+        })
+
+        // The outer wrapper editor is what the JTable registers its CellEditorListener on.
+        // CRITICAL: stopCellEditing() MUST call fireEditingStopped() so the JTable knows
+        // to call getCellEditorValue() and commit the value to the model.
+        val outerEditor = object : AbstractCellEditor(), TableCellEditor {
             private var currentEditor: TableCellEditor? = null
 
             override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
@@ -411,66 +512,59 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                     "Direction along X" -> directionEditor
                     "Kind" -> kindEditor
                     "Start Point", "End Point" -> pointEditor
+                    "X" -> if (activeWallLayoutDoc != null) xSpinnerEditor else defaultEditor
+                    "Z" -> if (activeWallLayoutDoc != null) zSpinnerEditor else defaultEditor
                     else -> defaultEditor
                 }
                 return currentEditor!!.getTableCellEditorComponent(table, value, isSelected, row, column)
             }
 
-            override fun getCellEditorValue(): Any? {
-                return currentEditor?.cellEditorValue
-            }
+            override fun getCellEditorValue(): Any? = currentEditor?.cellEditorValue
 
-            override fun isCellEditable(e: EventObject?): Boolean {
-                return true
-            }
+            override fun isCellEditable(e: EventObject?) = true
 
-            override fun shouldSelectCell(anEvent: EventObject?): Boolean {
-                return true
-            }
+            override fun shouldSelectCell(anEvent: EventObject?) = true
 
             override fun stopCellEditing(): Boolean {
-                return currentEditor?.stopCellEditing() ?: true
+                val result = currentEditor?.stopCellEditing() ?: true
+                if (result) fireEditingStopped()   // notify JTable so it calls setValueAt()
+                return result
             }
 
             override fun cancelCellEditing() {
                 currentEditor?.cancelCellEditing()
+                fireEditingCanceled()
             }
         }
+
+        // Wire Enter key on the text field to commit via the outer registered editor
+        defaultTextField.addActionListener {
+            if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
+            dimensionTable.clearSelection()
+        }
+
+        dimensionTable.columnModel.getColumn(1).cellEditor = outerEditor
 
         dimensionTable.columnModel.getColumn(1).cellRenderer = object : TableCellRenderer {
             private val defaultRenderer = dimensionTable.getDefaultRenderer(Any::class.java)
             override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
                 val propName = table?.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
-                
-                if (propName == "Direction along X" || propName == "Window Position" || propName == "Kind") {
-                    val comboBox = when (propName) {
-                        "Direction along X" -> directionComboBox
-                        "Window Position" -> windowPositionComboBox
-                        else -> kindComboBox
-                    }
-                    
-                    if (propName == "Kind") {
-                        kindComboBox.removeAllItems()
-                        val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
-                        val doc = wallLayoutWindow?.doc?.floorPlanDoc ?: app.activeDocument
-                        doc?.kinds?.forEach {
-                            kindComboBox.addItem(it.name)
-                        }
-                    }
-                    
+
+                // Render Direction/Position as comboboxes so the display text is correct
+                // (true/false → "Along X"/"Along Y", enum → name).
+                // "Kind" is NOT rendered via the shared kindComboBox: using a shared comboBox
+                // instance as both editor and renderer causes the internal layout to become
+                // stale after the first edit, pushing the dropdown button off-centre.
+                // Plain-text rendering via the default renderer is correct and simpler.
+                if (propName == "Direction along X" || propName == "Window Position") {
+                    val comboBox = if (propName == "Direction along X") directionComboBox else windowPositionComboBox
                     comboBox.selectedItem = value
-                    
-                    if (isSelected) {
-                        comboBox.background = table?.selectionBackground
-                        comboBox.foreground = table?.selectionForeground
-                    } else {
-                        comboBox.background = table?.background
-                        comboBox.foreground = table?.foreground
-                    }
+                    comboBox.background = if (isSelected) table?.selectionBackground else table?.background
+                    comboBox.foreground = if (isSelected) table?.selectionForeground else table?.foreground
                     comboBox.font = table?.font
                     return comboBox
                 }
-                
+
                 return defaultRenderer.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
             }
         }
@@ -561,9 +655,16 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     fun clearFields() {
-        isUpdatingFields = true
-        if (dimensionTable.isEditing) {
+        // Commit any pending cell edit before suppressing update events, so changes aren't lost
+        if (!isUpdatingFields && dimensionTable.isEditing) {
             dimensionTable.cellEditor?.stopCellEditing()
+        }
+        isUpdatingFields = true
+        activeWallLayoutDoc = null
+        // Restore auto-commit on focus-loss for non-wall-layout contexts
+        dimensionTable.putClientProperty("terminateEditOnFocusLost", true)
+        if (dimensionTable.isEditing) {
+            dimensionTable.cellEditor?.cancelCellEditing()
             dimensionTable.removeEditor()
         }
         if (polygonTable.isEditing) {
@@ -586,6 +687,15 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         revalidate()
         repaint()
         isUpdatingFields = false
+    }
+
+    /** Cancel any active cell edit without committing, so the model stays unchanged.
+     *  Called by the wall layout canvas at the start of mousePressed so that a pending
+     *  spinner edit doesn't shift the point's position before the hit test runs. */
+    fun cancelCurrentEdit() {
+        if (dimensionTable.isEditing) {
+            dimensionTable.cellEditor?.cancelCellEditing()
+        }
     }
 
     private fun getFloorPlanCoords(p: WallLayoutPoint, wall: Wall, isFront: Boolean): java.awt.geom.Point2D.Double {
@@ -626,9 +736,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         if (activeDoc != null) {
             applyFloorPlanManualChanges(activeDoc, source)
         } else {
-            val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
-            if (wallLayoutWindow != null) {
-                applyWallLayoutManualChanges(wallLayoutWindow.doc, source)
+            val wlDoc = activeWallLayoutDoc
+            if (wlDoc != null) {
+                applyWallLayoutManualChanges(wlDoc, source)
             }
         }
     }
@@ -646,6 +756,14 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         if (newVal == null) return
 
         when (source) {
+            "Name" -> {
+                val v = newVal.toString()
+                if (p.name != v) {
+                    doc.saveState()
+                    p.name = v
+                    doc.window?.canvas?.repaint()
+                }
+            }
             "X" -> {
                 val v = newVal.toString().toDoubleOrNull() ?: return
                 if (p.x != v) {

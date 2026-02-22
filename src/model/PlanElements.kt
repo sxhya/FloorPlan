@@ -7,9 +7,9 @@ import java.awt.geom.Line2D
 import java.awt.geom.Point2D
 import java.io.Serializable
 
-data class WallLayoutKind(var name: String, var color: Color) : Serializable
+data class WallLayoutKind(var name: String, var color: Color, var diameter: Double = 1.0) : Serializable
 
-data class WallLayoutPoint(var x: Double, var z: Int, var kind: Int) : Serializable
+data class WallLayoutPoint(var x: Double, var z: Int, var kind: Int, var name: String = "") : Serializable
 
 class WallLayout : Serializable {
     val points = mutableListOf<WallLayoutPoint>()

@@ -67,9 +67,24 @@ data class StairInfo(
     }
 }
 
+data class Cylinder3D(
+    val start: Vector3D,
+    val end: Vector3D,
+    val radius: Double,
+    val color: java.awt.Color
+) : Serializable
+
+data class Label3D(
+    val position: Vector3D,
+    val text: String,
+    val color: java.awt.Color
+) : Serializable
+
 class Model3D : Serializable {
     val rects = mutableListOf<Rect3D>()
     val triangles = mutableListOf<Triangle3D>()
+    val cylinders = mutableListOf<Cylinder3D>()
+    val labels = mutableListOf<Label3D>()
     val lightPositions = mutableListOf<Vector3D>()
     val stairInfos = mutableListOf<StairInfo>()
     val doorInfos = mutableListOf<DoorInfo>()

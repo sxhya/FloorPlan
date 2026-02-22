@@ -252,7 +252,8 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
 
                     // Stop any active editing and commit values to the CURRENT element before changing selection
                     doc.app.sidePanel.clearFields()
-                    
+                    doc.app.clearOtherSelections(exceptFloorPlan = doc)
+
                     doc.selectedElement = doc.elements.reversed().find { 
                         it.contains(doc.screenToModel(e.x, doc.offsetX).roundToInt(), doc.screenToModel(e.y, doc.offsetY).roundToInt())
                     }

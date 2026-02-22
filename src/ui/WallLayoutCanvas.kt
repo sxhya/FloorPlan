@@ -21,14 +21,21 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         
         val mouseAdapter = object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
+                // Cancel any open side-panel spinner edit before hit-testing.
+                // terminateEditOnFocusLost is disabled for wall-layout mode, so the
+                // spinner does NOT auto-commit when focus moves to this window.
+                // Cancelling here keeps the model unchanged so the hit test matches
+                // what the user sees on screen.
+                doc.app.sidePanel.cancelCurrentEdit()
+
                 if (SwingUtilities.isRightMouseButton(e)) {
                     showPopup(e)
                     return
                 }
-                
+
                 val modelX = doc.screenToModel(e.x, doc.offsetX)
                 val modelZ = doc.screenToModel(e.y, doc.offsetY, true)
-                
+
                 dragPoint = doc.layout.points.find { p ->
                     val sx = doc.modelToScreen(p.x, doc.offsetX)
                     val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
@@ -36,6 +43,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 }
                 
                 doc.selectedPoint = dragPoint
+                if (dragPoint != null) doc.app.clearOtherSelections(exceptWallLayout = doc)
                 isPanning = (dragPoint == null)
                 doc.app.sidePanel.updateFieldsForActiveDocument()
                 lastMouseX = e.x
@@ -76,21 +84,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
                 newX = newX.coerceIn(doc.wallStart, doc.wallEnd)
                 newZ = newZ.coerceIn(0.0, wallHeight)
-                
-                // Sticky behavior
-                val threshold = 5.0 / doc.scale / doc.pixelsPerCm
-                for (p in doc.layout.points) {
-                    if (p === dp) continue
-                    if (abs(p.x - newX) < threshold) newX = p.x
-                    if (abs(p.z.toDouble() - newZ) < threshold) newZ = p.z.toDouble()
-                }
 
-                val perpEdges = getPerpendicularWallEdges()
-                for (edgeX in perpEdges) {
-                    if (abs(edgeX - newX) < threshold) newX = edgeX
-                }
-                
-                dp.x = newX
+                // Round to nearest whole centimeter
+                dp.x = newX.roundToInt().toDouble()
                 dp.z = newZ.roundToInt()
                 
                 lastMouseX = e.x
@@ -194,52 +190,9 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         return edges
     }
 
-    private fun getDockedPoints(): List<WallLayoutPoint> {
-        val dockedPoints = mutableListOf<WallLayoutPoint>()
-        val wall = doc.wall
-        val isFront = doc.isFront
-        val isVertical = doc.isVertical
-        
-        // Define the line segment of the current wall side in floor plan
-        val wallSideX = if (isVertical) (if (isFront) wall.x else wall.x + wall.width).toDouble() else 0.0
-        val wallSideY = if (!isVertical) (if (isFront) wall.y else wall.y + wall.height).toDouble() else 0.0
-        
-        val wallStart = if (isVertical) wall.y.toDouble() else wall.x.toDouble()
-        val wallEnd = if (isVertical) (wall.y + wall.height).toDouble() else (wall.x + wall.width).toDouble()
-
-        val otherWalls = doc.floorPlanDoc.elements.filterIsInstance<Wall>().filter { it !== wall }
-
-        for (other in otherWalls) {
-            val layouts = listOf(true to other.frontLayout, false to other.backLayout)
-            for ((otherIsFront, layout) in layouts) {
-                for (p in layout.points) {
-                    val fp = other.getFloorPlanCoords(p, otherIsFront)
-                    
-                    // Check if this floor plan point lies on the current wall's face segment
-                    val onSegment = if (isVertical) {
-                        abs(fp.x - wallSideX) < 1e-6 && fp.y >= wallStart - 1e-6 && fp.y <= wallEnd + 1e-6
-                    } else {
-                        abs(fp.y - wallSideY) < 1e-6 && fp.x >= wallStart - 1e-6 && fp.x <= wallEnd + 1e-6
-                    }
-
-                    if (onSegment) {
-                        // The coordinate along the current wall's layout is fp.y if vertical, fp.x if horizontal
-                        val layoutX = if (isVertical) fp.y else fp.x
-                        
-                        // Avoid duplicates if the point is already in doc.layout.points
-                        val alreadyExists = doc.layout.points.any { 
-                            abs(it.x - layoutX) < 1e-6 && it.z == p.z && it.kind == p.kind 
-                        }
-                        
-                        if (!alreadyExists) {
-                            dockedPoints.add(WallLayoutPoint(layoutX, p.z, p.kind))
-                        }
-                    }
-                }
-            }
-        }
-        return dockedPoints
-    }
+    private fun getDockedPoints(): List<WallLayoutPoint> =
+        computeDockedPoints(doc.wall, doc.isFront,
+            doc.floorPlanDoc.elements.filterIsInstance<Wall>())
 
     override fun paintComponent(g: Graphics) {
         super.paintComponent(g)
@@ -259,230 +212,217 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val pointsByKind = allPoints.groupBy { it.kind }
         if (pointsByKind.isEmpty()) return
 
-        val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+        val wallHeight = doc.app.getThreeDDocuments().firstOrNull()
+            ?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
 
-        val openings = doc.floorPlanDoc.elements.filter { it is PlanWindow || it is Door }
-            .filter { doc.floorPlanDoc.findContainingWall(it.x, it.y, it.width, it.height) === doc.wall }
-            .map { op ->
-                val isVertical = doc.isVertical
-                val absPos = if (isVertical) op.y else op.x
-                val opWidth = if (isVertical) op.height else op.width
-                val opHeight3D = if (op is PlanWindow) op.height3D else (op as Door).verticalHeight
-                val sillElevation = if (op is PlanWindow) op.sillElevation else 0
-                Rectangle2D.Double(absPos.toDouble(), sillElevation.toDouble(), opWidth.toDouble(), opHeight3D.toDouble())
-            }
+        val openings = buildOpeningsForWall(doc.wall, doc.isVertical,
+            doc.floorPlanDoc.elements.filter { it is PlanWindow || it is Door }
+                .filter { doc.floorPlanDoc.findContainingWall(it.x, it.y, it.width, it.height) === doc.wall })
 
         for ((kindIdx, points) in pointsByKind) {
             if (points.size < 2) continue
-            
             val kind = doc.floorPlanDoc.kinds.getOrNull(kindIdx)
             g2.color = kind?.color ?: Color.BLACK
-            
-            val edges = calculateManhattanMST(points)
-            for (edge in edges) {
-                drawObstacleAvoidingPath(g2, edge.first, edge.second, openings, doc.wallStart, doc.wallEnd, wallHeight)
-            }
-        }
-    }
-
-    private fun drawObstacleAvoidingPath(
-        g2: Graphics2D,
-        p1: WallLayoutPoint,
-        p2: WallLayoutPoint,
-        openings: List<Rectangle2D.Double>,
-        wallStart: Double,
-        wallEnd: Double,
-        wallHeight: Double
-    ) {
-        // Collect all relevant X and Z coordinates for the Hanan grid
-        val xCoords = mutableSetOf(wallStart, wallEnd, p1.x, p2.x)
-        val zCoords = mutableSetOf(0.0, wallHeight, p1.z.toDouble(), p2.z.toDouble())
-        
-        for (op in openings) {
-            xCoords.add(op.x)
-            xCoords.add(op.x + op.width)
-            zCoords.add(op.y)
-            zCoords.add(op.y + op.height)
-        }
-        
-        val sortedX = xCoords.filter { it in wallStart..wallEnd }.sorted()
-        val sortedZ = zCoords.filter { it in 0.0..wallHeight }.sorted()
-        
-        // A* algorithm on the Hanan grid
-        val startPos = Pair(sortedX.indexOf(p1.x), sortedZ.indexOf(p1.z.toDouble()))
-        val targetPos = Pair(sortedX.indexOf(p2.x), sortedZ.indexOf(p2.z.toDouble()))
-        
-        if (startPos.first == -1 || startPos.second == -1 || targetPos.first == -1 || targetPos.second == -1) {
-            // Fallback to simple path if something goes wrong
-            drawOrthogonalPath(g2, p1, p2)
-            return
-        }
-
-        // Direction: 0 = None, 1 = Horizontal, 2 = Vertical
-        val openSet = PriorityQueue<PathNode>(compareBy { it.fScore })
-        // Key: (xIndex, zIndex, direction)
-        val gScore = mutableMapOf<Triple<Int, Int, Int>, Double>().withDefault { Double.MAX_VALUE }
-        val cameFrom = mutableMapOf<Triple<Int, Int, Int>, Triple<Int, Int, Int>>()
-
-        val startNode = Triple(startPos.first, startPos.second, 0)
-        gScore[startNode] = 0.0
-        openSet.add(PathNode(startNode, heuristic(startPos, targetPos, sortedX, sortedZ), 0.0))
-
-        val turnPenalty = 5.0 // Penalty for each 90-degree turn in cm
-
-        var bestFinalNode: Triple<Int, Int, Int>? = null
-
-        while (openSet.isNotEmpty()) {
-            val current = openSet.poll().state
-            val (currX, currZ, currDir) = current
-
-            if (currX == targetPos.first && currZ == targetPos.second) {
-                bestFinalNode = current
-                break
-            }
-
-            for (neighborPos in getNeighbors(Pair(currX, currZ), sortedX.size, sortedZ.size)) {
-                // Determine direction to neighbor
-                val nextDir = if (neighborPos.first != currX) 1 else 2
-                
-                if (isEdgeBlocked(Pair(currX, currZ), neighborPos, sortedX, sortedZ, openings)) continue
-
-                val moveDist = dist(Pair(currX, currZ), neighborPos, sortedX, sortedZ)
-                val cost = if (currDir != 0 && currDir != nextDir) turnPenalty else 0.0
-                val tentativeGScore = gScore.getValue(current) + moveDist + cost
-
-                val nextState = Triple(neighborPos.first, neighborPos.second, nextDir)
-
-                if (tentativeGScore < gScore.getValue(nextState)) {
-                    cameFrom[nextState] = current
-                    gScore[nextState] = tentativeGScore
-                    val h = heuristic(neighborPos, targetPos, sortedX, sortedZ)
-                    openSet.add(PathNode(nextState, tentativeGScore + h, tentativeGScore))
+            val edges = computeManhattanMST(points)
+            for ((p1, p2) in edges) {
+                val waypoints = computeOrthogonalPath(
+                    p1, p2, openings, doc.wallStart, doc.wallEnd, wallHeight)
+                for (i in 0 until waypoints.size - 1) {
+                    val (lx1, lz1) = waypoints[i]
+                    val (lx2, lz2) = waypoints[i + 1]
+                    g2.drawLine(
+                        doc.modelToScreen(lx1, doc.offsetX),
+                        doc.modelToScreen(lz1, doc.offsetY, true),
+                        doc.modelToScreen(lx2, doc.offsetX),
+                        doc.modelToScreen(lz2, doc.offsetY, true)
+                    )
                 }
             }
         }
+    }
 
-        if (bestFinalNode != null) {
-            drawPath(g2, cameFrom, bestFinalNode, sortedX, sortedZ)
-        } else {
-            // No path found, fallback
-            drawOrthogonalPath(g2, p1, p2)
+    companion object {
+        /** Convert a list of PlanWindow/Door elements on a wall face into obstacle rectangles
+         *  in wall-layout space: x = along-wall coord, y = height (z in model), width, height. */
+        fun buildOpeningsForWall(
+            wall: Wall,
+            isVertical: Boolean,
+            openingElements: List<PlanElement>
+        ): List<Rectangle2D.Double> = openingElements.map { op ->
+            val absPos = if (isVertical) op.y else op.x
+            val opWidth = if (isVertical) op.height else op.width
+            val opHeight3D = if (op is PlanWindow) op.height3D else (op as Door).verticalHeight
+            val sillElev = if (op is PlanWindow) op.sillElevation else 0
+            Rectangle2D.Double(absPos.toDouble(), sillElev.toDouble(),
+                opWidth.toDouble(), opHeight3D.toDouble())
         }
-    }
 
-    private data class PathNode(val state: Triple<Int, Int, Int>, val fScore: Double, val gScore: Double)
+        /** Points from adjacent walls whose floor-plan position falls on this wall's face. */
+        fun computeDockedPoints(
+            wall: Wall,
+            isFront: Boolean,
+            allWalls: List<Wall>
+        ): List<WallLayoutPoint> {
+            val isVertical = wall.width < wall.height
+            val wallSideX = if (isVertical) (if (isFront) wall.x else wall.x + wall.width).toDouble() else 0.0
+            val wallSideY = if (!isVertical) (if (isFront) wall.y else wall.y + wall.height).toDouble() else 0.0
+            val wallStart = if (isVertical) wall.y.toDouble() else wall.x.toDouble()
+            val wallEnd   = if (isVertical) (wall.y + wall.height).toDouble() else (wall.x + wall.width).toDouble()
+            val layout = if (isFront) wall.frontLayout else wall.backLayout
 
-    private fun heuristic(a: Pair<Int, Int>, b: Pair<Int, Int>, x: List<Double>, z: List<Double>): Double {
-        return abs(x[a.first] - x[b.first]) + abs(z[a.second] - z[b.second])
-    }
-
-    private fun dist(a: Pair<Int, Int>, b: Pair<Int, Int>, x: List<Double>, z: List<Double>): Double {
-        return abs(x[a.first] - x[b.first]) + abs(z[a.second] - z[b.second])
-    }
-
-    private fun getNeighbors(pos: Pair<Int, Int>, maxX: Int, maxZ: Int): List<Pair<Int, Int>> {
-        val neighbors = mutableListOf<Pair<Int, Int>>()
-        if (pos.first > 0) neighbors.add(Pair(pos.first - 1, pos.second))
-        if (pos.first < maxX - 1) neighbors.add(Pair(pos.first + 1, pos.second))
-        if (pos.second > 0) neighbors.add(Pair(pos.first, pos.second - 1))
-        if (pos.second < maxZ - 1) neighbors.add(Pair(pos.first, pos.second + 1))
-        return neighbors
-    }
-
-    private fun isEdgeBlocked(
-        a: Pair<Int, Int>,
-        b: Pair<Int, Int>,
-        x: List<Double>,
-        z: List<Double>,
-        openings: List<Rectangle2D.Double>
-    ): Boolean {
-        // Small epsilon to allow lines on the edge of openings
-        val eps = 0.1
-        for (op in openings) {
-            // If it's a horizontal edge
-            if (a.second == b.second) {
-                val zCoord = z[a.second]
-                if (zCoord > op.y + eps && zCoord < op.y + op.height - eps) {
-                    val minX = minOf(x[a.first], x[b.first])
-                    val maxX = maxOf(x[a.first], x[b.first])
-                    if (minX < op.x + op.width - eps && maxX > op.x + eps) return true
-                }
-            } else { // Vertical edge
-                val xCoord = x[a.first]
-                if (xCoord > op.x + eps && xCoord < op.x + op.width - eps) {
-                    val minZ = minOf(z[a.second], z[b.second])
-                    val maxZ = maxOf(z[a.second], z[b.second])
-                    if (minZ < op.y + op.height - eps && maxZ > op.y + eps) return true
-                }
-            }
-        }
-        return false
-    }
-
-    private fun drawPath(
-        g2: Graphics2D,
-        cameFrom: Map<Triple<Int, Int, Int>, Triple<Int, Int, Int>>,
-        targetState: Triple<Int, Int, Int>,
-        x: List<Double>,
-        z: List<Double>
-    ) {
-        var current = targetState
-        while (cameFrom.containsKey(current)) {
-            val prev = cameFrom[current]!!
-            
-            val sx1 = doc.modelToScreen(x[current.first], doc.offsetX)
-            val sz1 = doc.modelToScreen(z[current.second], doc.offsetY, true)
-            val sx2 = doc.modelToScreen(x[prev.first], doc.offsetX)
-            val sz2 = doc.modelToScreen(z[prev.second], doc.offsetY, true)
-            g2.drawLine(sx1, sz1, sx2, sz2)
-            current = prev
-        }
-    }
-
-    private fun calculateManhattanMST(points: List<WallLayoutPoint>): List<Pair<WallLayoutPoint, WallLayoutPoint>> {
-        if (points.size < 2) return emptyList()
-        
-        val edges = mutableListOf<Pair<WallLayoutPoint, WallLayoutPoint>>()
-        val visited = mutableSetOf<WallLayoutPoint>()
-        val unvisited = points.toMutableSet()
-        
-        visited.add(points[0])
-        unvisited.remove(points[0])
-        
-        while (unvisited.isNotEmpty()) {
-            var minDistance = Double.MAX_VALUE
-            var bestEdge: Pair<WallLayoutPoint, WallLayoutPoint>? = null
-            
-            for (v in visited) {
-                for (u in unvisited) {
-                    val dist = abs(v.x - u.x) + abs(v.z - u.z)
-                    if (dist < minDistance) {
-                        minDistance = dist
-                        bestEdge = Pair(v, u)
+            val result = mutableListOf<WallLayoutPoint>()
+            for (other in allWalls.filter { it !== wall }) {
+                for ((otherIsFront, otherLayout) in listOf(true to other.frontLayout, false to other.backLayout)) {
+                    for (p in otherLayout.points) {
+                        val fp = other.getFloorPlanCoords(p, otherIsFront)
+                        val onSegment = if (isVertical) {
+                            abs(fp.x - wallSideX) < 1e-6 && fp.y >= wallStart - 1e-6 && fp.y <= wallEnd + 1e-6
+                        } else {
+                            abs(fp.y - wallSideY) < 1e-6 && fp.x >= wallStart - 1e-6 && fp.x <= wallEnd + 1e-6
+                        }
+                        if (onSegment) {
+                            val layoutX = if (isVertical) fp.y else fp.x
+                            val duplicate = layout.points.any {
+                                abs(it.x - layoutX) < 1e-6 && it.z == p.z && it.kind == p.kind
+                            }
+                            if (!duplicate) result.add(WallLayoutPoint(layoutX, p.z, p.kind))
+                        }
                     }
                 }
             }
-            
-            if (bestEdge != null) {
-                edges.add(bestEdge)
-                visited.add(bestEdge.second)
-                unvisited.remove(bestEdge.second)
-            }
+            return result
         }
-        return edges
-    }
 
-    private fun drawOrthogonalPath(g2: Graphics2D, p1: WallLayoutPoint, p2: WallLayoutPoint) {
-        val x1 = doc.modelToScreen(p1.x, doc.offsetX)
-        val z1 = doc.modelToScreen(p1.z.toDouble(), doc.offsetY, true)
-        val x2 = doc.modelToScreen(p2.x, doc.offsetX)
-        val z2 = doc.modelToScreen(p2.z.toDouble(), doc.offsetY, true)
-        
-        // Orthogonal path from (x1, z1) to (x2, z2)
-        // Two options: (x1, z1) -> (x2, z1) -> (x2, z2) OR (x1, z1) -> (x1, z2) -> (x2, z2)
-        // We can just pick one, or try to be smart. Let's just pick one for now.
-        g2.drawLine(x1, z1, x2, z1)
-        g2.drawLine(x2, z1, x2, z2)
+        /** Prim's MST over wall-layout points using Manhattan distance. */
+        fun computeManhattanMST(
+            points: List<WallLayoutPoint>
+        ): List<Pair<WallLayoutPoint, WallLayoutPoint>> {
+            if (points.size < 2) return emptyList()
+            val edges = mutableListOf<Pair<WallLayoutPoint, WallLayoutPoint>>()
+            val visited = mutableSetOf<WallLayoutPoint>()
+            val unvisited = points.toMutableSet()
+            visited.add(points[0])
+            unvisited.remove(points[0])
+            while (unvisited.isNotEmpty()) {
+                var minDist = Double.MAX_VALUE
+                var best: Pair<WallLayoutPoint, WallLayoutPoint>? = null
+                for (v in visited) {
+                    for (u in unvisited) {
+                        val d = abs(v.x - u.x) + abs(v.z - u.z)
+                        if (d < minDist) { minDist = d; best = v to u }
+                    }
+                }
+                if (best != null) {
+                    edges.add(best)
+                    visited.add(best.second)
+                    unvisited.remove(best.second)
+                }
+            }
+            return edges
+        }
+
+        /**
+         * A* on the Hanan grid between p1 and p2 avoiding openings.
+         * Returns an ordered list of (layoutX, layoutZ) waypoints from p1 to p2.
+         * openings: obstacles in layout space (x=along-wall, y=height).
+         */
+        fun computeOrthogonalPath(
+            p1: WallLayoutPoint,
+            p2: WallLayoutPoint,
+            openings: List<Rectangle2D.Double>,
+            wallStart: Double,
+            wallEnd: Double,
+            wallHeight: Double
+        ): List<Pair<Double, Double>> {
+            val xCoords = mutableSetOf(wallStart, wallEnd, p1.x, p2.x)
+            val zCoords = mutableSetOf(0.0, wallHeight, p1.z.toDouble(), p2.z.toDouble())
+            for (op in openings) {
+                xCoords += op.x; xCoords += op.x + op.width
+                zCoords += op.y; zCoords += op.y + op.height
+            }
+            val sortedX = xCoords.filter { it in wallStart..wallEnd }.sorted()
+            val sortedZ = zCoords.filter { it in 0.0..wallHeight }.sorted()
+
+            val si = sortedX.indexOf(p1.x); val sj = sortedZ.indexOf(p1.z.toDouble())
+            val ti = sortedX.indexOf(p2.x); val tj = sortedZ.indexOf(p2.z.toDouble())
+            if (si < 0 || sj < 0 || ti < 0 || tj < 0) return fallbackPath(p1, p2)
+
+            data class PNode(val state: Triple<Int,Int,Int>, val f: Double, val g: Double)
+            val open = PriorityQueue<PNode>(compareBy { it.f })
+            val gScore = HashMap<Triple<Int,Int,Int>, Double>().withDefault { Double.MAX_VALUE }
+            val cameFrom = HashMap<Triple<Int,Int,Int>, Triple<Int,Int,Int>>()
+            fun heur(xi: Int, zi: Int) =
+                abs(sortedX[xi] - sortedX[ti]) + abs(sortedZ[zi] - sortedZ[tj])
+
+            val startNode = Triple(si, sj, 0)
+            gScore[startNode] = 0.0
+            open.add(PNode(startNode, heur(si, sj), 0.0))
+            val turnPenalty = 5.0
+            var finalNode: Triple<Int,Int,Int>? = null
+
+            while (open.isNotEmpty()) {
+                val (cur) = open.poll()
+                val (cx, cz, cDir) = cur
+                if (cx == ti && cz == tj) { finalNode = cur; break }
+                val neighbors = mutableListOf<Pair<Int,Int>>()
+                if (cx > 0)             neighbors += (cx - 1) to cz
+                if (cx < sortedX.size - 1) neighbors += (cx + 1) to cz
+                if (cz > 0)             neighbors += cx to (cz - 1)
+                if (cz < sortedZ.size - 1) neighbors += cx to (cz + 1)
+                for ((nx, nz) in neighbors) {
+                    val nDir = if (nx != cx) 1 else 2
+                    if (isSegmentBlocked(cx, cz, nx, nz, sortedX, sortedZ, openings)) continue
+                    val moveDist = abs(sortedX[cx] - sortedX[nx]) + abs(sortedZ[cz] - sortedZ[nz])
+                    val cost = if (cDir != 0 && cDir != nDir) turnPenalty else 0.0
+                    val tentG = gScore.getValue(cur) + moveDist + cost
+                    val next = Triple(nx, nz, nDir)
+                    if (tentG < gScore.getValue(next)) {
+                        cameFrom[next] = cur
+                        gScore[next] = tentG
+                        open.add(PNode(next, tentG + heur(nx, nz), tentG))
+                    }
+                }
+            }
+
+            if (finalNode == null) return fallbackPath(p1, p2)
+
+            val waypoints = mutableListOf<Pair<Double, Double>>()
+            var cur: Triple<Int, Int, Int> = finalNode!!
+            while (cameFrom.containsKey(cur)) {
+                waypoints.add(sortedX[cur.first] to sortedZ[cur.second])
+                cur = cameFrom[cur]!!
+            }
+            waypoints.add(sortedX[cur.first] to sortedZ[cur.second])
+            waypoints.reverse()
+            return waypoints
+        }
+
+        private fun isSegmentBlocked(
+            cx: Int, cz: Int, nx: Int, nz: Int,
+            x: List<Double>, z: List<Double>,
+            openings: List<Rectangle2D.Double>
+        ): Boolean {
+            val eps = 0.1
+            for (op in openings) {
+                if (cz == nz) {
+                    val zCoord = z[cz]
+                    if (zCoord > op.y + eps && zCoord < op.y + op.height - eps) {
+                        val minX = minOf(x[cx], x[nx]); val maxX = maxOf(x[cx], x[nx])
+                        if (minX < op.x + op.width - eps && maxX > op.x + eps) return true
+                    }
+                } else {
+                    val xCoord = x[cx]
+                    if (xCoord > op.x + eps && xCoord < op.x + op.width - eps) {
+                        val minZ = minOf(z[cz], z[nz]); val maxZ = maxOf(z[cz], z[nz])
+                        if (minZ < op.y + op.height - eps && maxZ > op.y + eps) return true
+                    }
+                }
+            }
+            return false
+        }
+
+        private fun fallbackPath(p1: WallLayoutPoint, p2: WallLayoutPoint): List<Pair<Double, Double>> =
+            listOf(p1.x to p1.z.toDouble(), p2.x to p1.z.toDouble(), p2.x to p2.z.toDouble())
     }
 
     private fun drawAxes(g2: Graphics2D) {
@@ -735,42 +675,73 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
     }
 
     private fun drawPoints(g2: Graphics2D) {
+        val perpEdges = getPerpendicularWallEdges()
+        val threshold = 1.0 // 1cm tolerance for docking detection
+        g2.font = Font("SansSerif", Font.BOLD, 10)
+
         for (p in doc.layout.points) {
             val sx = doc.modelToScreen(p.x, doc.offsetX)
             val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
-            
+
             val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
             g2.color = kind?.color ?: Color.BLACK
-            
+
             g2.fillOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
-            
+
             if (p === doc.selectedPoint) {
                 g2.color = Color.BLACK
                 g2.stroke = BasicStroke(2f)
                 g2.drawOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
                 g2.stroke = BasicStroke(1f)
             }
+
+            // Show "D" badge if point is snapped to a perpendicular wall edge
+            val isDocked = perpEdges.any { abs(it - p.x) < threshold }
+            if (isDocked) {
+                drawDockedBadge(g2, sx, sy - pointRadius - 2)
+            }
+
+            // Draw name label below the point
+            if (p.name.isNotEmpty()) {
+                val nameColor = (kind?.color ?: Color.BLACK).darker()
+                g2.color = nameColor
+                val fm = g2.fontMetrics
+                g2.drawString(p.name, sx - fm.stringWidth(p.name) / 2, sy + pointRadius + fm.ascent)
+            }
         }
 
-        // Draw docked points
-        val dockedPoints = getDockedPoints()
-        g2.font = Font("SansSerif", Font.PLAIN, 10)
-        for (p in dockedPoints) {
+        // Draw docked ghost points (from adjacent walls)
+        for (p in getDockedPoints()) {
             val sx = doc.modelToScreen(p.x, doc.offsetX)
             val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
 
             val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
             val baseColor = kind?.color ?: Color.BLACK
-            // Use semi-transparent color for docked points
+            // Use semi-transparent color for docked ghost points
             g2.color = Color(baseColor.red, baseColor.green, baseColor.blue, 128)
-            
+
             g2.fillOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
-            
-            // Draw label "docked"
-            g2.color = Color.GRAY
-            val label = "docked"
-            val fm = g2.fontMetrics
-            g2.drawString(label, sx - fm.stringWidth(label) / 2, sy - pointRadius - 5)
+
+            // Draw "D" badge above ghost point
+            drawDockedBadge(g2, sx, sy - pointRadius - 2)
         }
+    }
+
+    private fun drawDockedBadge(g2: Graphics2D, cx: Int, bottomY: Int) {
+        val fm = g2.fontMetrics
+        val label = "D"
+        val lw = fm.stringWidth(label)
+        val lh = fm.ascent
+        val pad = 2
+        val bx = cx - lw / 2 - pad
+        val by = bottomY - lh - pad
+        val bw = lw + pad * 2
+        val bh = lh + pad * 2
+        // Background
+        g2.color = Color(80, 80, 80, 200)
+        g2.fillRoundRect(bx, by, bw, bh, 3, 3)
+        // Text
+        g2.color = Color.WHITE
+        g2.drawString(label, cx - lw / 2, bottomY - pad)
     }
 }

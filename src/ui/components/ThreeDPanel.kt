@@ -2,16 +2,22 @@ package ui.components
 
 import javafx.application.Platform
 import javafx.embed.swing.JFXPanel
+import javafx.geometry.Point3D
 import javafx.scene.*
 import javafx.scene.paint.Color as JFXColor
 import javafx.scene.paint.PhongMaterial
 import javafx.scene.shape.Box
 import javafx.scene.shape.CullFace
+import javafx.scene.shape.Cylinder
 import javafx.scene.shape.MeshView
 import javafx.scene.shape.Sphere
 import javafx.scene.shape.TriangleMesh
 import javafx.scene.transform.Rotate
 import javafx.scene.transform.Translate
+import javafx.scene.text.Font as JFXFont
+import javafx.scene.text.Text as JFXText
+import model.Cylinder3D
+import model.Label3D
 import model.Rect3D
 import model.Triangle3D
 import model.Vector3D
@@ -30,6 +36,8 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     private var root: Group? = null
     private var modelGroup: Group? = null
     private var windowGroup: Group? = null  // Separate group for windows with always-on lighting
+    private var utilitiesGroup: Group? = null  // Separate group for utility pipe cylinders
+    private var labelsGroup: Group? = null     // Separate group for point name labels
     private var roomLightsGroup: Group? = null  // Group for room lights (point lights)
     private var lightSpheresGroup: Group? = null  // Group for yellow spheres marking light positions (night mode only)
     private var floorGridGroup: Group? = null  // Group for floor grid at Z=0
@@ -95,6 +103,16 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val wGroup = Group()
         windowGroup = wGroup
         rootGroup.children.add(wGroup)
+
+        // Separate group for utility pipe cylinders
+        val ugGroup = Group()
+        utilitiesGroup = ugGroup
+        rootGroup.children.add(ugGroup)
+
+        // Separate group for point name labels
+        val lgGroup = Group()
+        labelsGroup = lgGroup
+        rootGroup.children.add(lgGroup)
         
         // Always-on ambient light for windows so they remain visible regardless of daylight setting
         val wAmbient = AmbientLight(JFXColor.WHITE)
@@ -581,7 +599,25 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             lightSpheresGroup?.translateX = center.x
             lightSpheresGroup?.translateY = center.z
             lightSpheresGroup?.translateZ = -center.y
-            
+
+            // Clear and rebuild utilities group (pipe cylinders)
+            utilitiesGroup?.children?.clear()
+            doc.model.cylinders.forEach { cyl ->
+                utilitiesGroup?.children?.add(createCylinderNode(cyl))
+            }
+            utilitiesGroup?.translateX = center.x
+            utilitiesGroup?.translateY = center.z
+            utilitiesGroup?.translateZ = -center.y
+
+            // Clear and rebuild labels group (point name text nodes)
+            labelsGroup?.children?.clear()
+            doc.model.labels.forEach { label ->
+                labelsGroup?.children?.add(createLabelNode(label))
+            }
+            labelsGroup?.translateX = center.x
+            labelsGroup?.translateY = center.z
+            labelsGroup?.translateZ = -center.y
+
             // Re-calculate camera distance to fit model
             updateCamera()
             updateLighting()
@@ -642,6 +678,59 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         return meshView
     }
     
+    private fun createCylinderNode(cyl: Cylinder3D): Node {
+        val dx = cyl.end.x - cyl.start.x
+        val dy = cyl.end.y - cyl.start.y
+        val dz = cyl.end.z - cyl.start.z
+        val length = sqrt(dx * dx + dy * dy + dz * dz)
+        if (length < 0.01) return Group()
+
+        val cylinder = Cylinder(cyl.radius, length)
+        val material = PhongMaterial(JFXColor.rgb(cyl.color.red, cyl.color.green, cyl.color.blue))
+        material.specularColor = JFXColor.WHITE
+        cylinder.material = material
+
+        // Midpoint in FX space: model(x,y,z) -> FX(-x,-z,y)
+        val midFxX = -(cyl.start.x + cyl.end.x) / 2.0
+        val midFxY = -(cyl.start.z + cyl.end.z) / 2.0
+        val midFxZ = (cyl.start.y + cyl.end.y) / 2.0
+
+        // Direction in FX space: model(dx,dy,dz) -> FX(-dx,-dz,dy)
+        val fxDx = -dx
+        val fxDy = -dz
+        val fxDz = dy
+
+        val group = Group(cylinder)
+        group.translateX = midFxX
+        group.translateY = midFxY
+        group.translateZ = midFxZ
+
+        // JavaFX Cylinder default axis is Y (0,1,0); rotate to align with direction
+        val defaultAxis = Point3D(0.0, 1.0, 0.0)
+        val target = Point3D(fxDx, fxDy, fxDz).normalize()
+        val cross = defaultAxis.crossProduct(target)
+        if (cross.magnitude() > 1e-6) {
+            val angle = Math.toDegrees(acos(defaultAxis.dotProduct(target).coerceIn(-1.0, 1.0)))
+            group.transforms.add(Rotate(angle, cross))
+        } else if (defaultAxis.dotProduct(target) < 0) {
+            group.transforms.add(Rotate(180.0, Point3D(1.0, 0.0, 0.0)))
+        }
+
+        return group
+    }
+
+    private fun createLabelNode(label: Label3D): Node {
+        val text = JFXText(label.text)
+        text.font = JFXFont.font("System", 20.0)
+        text.fill = JFXColor.rgb(label.color.red, label.color.green, label.color.blue)
+        // Position in FX space: model(x,y,z) -> FX(-x,-z,y)
+        val group = Group(text)
+        group.translateX = -label.position.x
+        group.translateY = -label.position.z
+        group.translateZ = label.position.y
+        return group
+    }
+
     private fun createTriangleMeshView(tri: Triangle3D): MeshView {
         val mesh = TriangleMesh()
         
@@ -793,10 +882,13 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             root?.children?.clear()
             modelGroup?.children?.clear()
             windowGroup?.children?.clear()
+            utilitiesGroup?.children?.clear()
             roomLightsGroup?.children?.clear()
             root = null
             modelGroup = null
             windowGroup = null
+            utilitiesGroup = null
+            labelsGroup = null
             roomLightsGroup = null
             camera = null
             cameraXform = null
