@@ -17,13 +17,12 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         init {
             putClientProperty("terminateEditOnFocusLost", true)
         }
-
-        override fun tableChanged(e: javax.swing.event.TableModelEvent?) {
-            if (isEditing) {
-                cellEditor?.stopCellEditing()
-            }
-            super.tableChanged(e)
-        }
+        // NOTE: Do NOT override tableChanged() to call stopCellEditing() here.
+        // TableModelEvents fire synchronously inside JTable.editingStopped() → setValueAt(),
+        // before removeEditor() clears the editing state. Calling stopCellEditing() from
+        // tableChanged() re-enters editingStopped() → setValueAt() → tableChanged() → ...
+        // causing infinite recursion and an EDT freeze (StackOverflowError).
+        // clearFields() already commits/cancels any active edit before touching the model.
     }
 
     private val mainFieldsPanel = JPanel(BorderLayout())
@@ -63,6 +62,12 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
     private var isUpdatingFields = false
     private var activeWallLayoutDoc: ui.WallLayoutDocument? = null
+
+    // "Assets" button shown when a WallLayoutPoint is selected
+    private val assetsButton = JButton("Assets")
+    private val wallPointActionsPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT)).also { it.add(assetsButton) }
+    private var currentWallPoint: model.WallLayoutPoint? = null
+    private var currentWallLayoutDocRef: ui.WallLayoutDocument? = null
 
     init {
         layout = BorderLayout()
@@ -177,6 +182,13 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 dimensionTable.clearSelection()
             }
         })
+
+        // Wire the persistent "Assets" button to the current wall-layout point context
+        assetsButton.addActionListener {
+            val p = currentWallPoint ?: return@addActionListener
+            val doc = currentWallLayoutDocRef ?: return@addActionListener
+            app.showModifyAssetsDialog(p, p.kind, doc.floorPlanDoc, doc.window)
+        }
     }
 
     fun addElement(type: ElementType) {
@@ -253,9 +265,16 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             dimensionTableModel.addRow(arrayOf("Z", p.z))
             val kindName = doc.floorPlanDoc.kinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
             dimensionTableModel.addRow(arrayOf("Kind", kindName))
+            // Show the "Assets" button for this point
+            currentWallPoint = p
+            currentWallLayoutDocRef = doc
+            mainFieldsPanel.add(wallPointActionsPanel, BorderLayout.SOUTH)
         } else {
             dimensionTableModel.addRow(arrayOf("Type", "WallLayout"))
             dimensionTableModel.addRow(arrayOf("Points count", doc.layout.points.size))
+            currentWallPoint = null
+            currentWallLayoutDocRef = null
+            mainFieldsPanel.remove(wallPointActionsPanel)
         }
         add(mainFieldsPanel, BorderLayout.CENTER)
         revalidate()
@@ -661,6 +680,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         }
         isUpdatingFields = true
         activeWallLayoutDoc = null
+        currentWallPoint = null
+        currentWallLayoutDocRef = null
+        mainFieldsPanel.remove(wallPointActionsPanel)
         // Restore auto-commit on focus-loss for non-wall-layout contexts
         dimensionTable.putClientProperty("terminateEditOnFocusLost", true)
         if (dimensionTable.isEditing) {

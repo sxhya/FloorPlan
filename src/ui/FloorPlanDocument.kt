@@ -29,6 +29,8 @@ class FloorPlanDocument(val app: FloorPlanApp) {
         WallLayoutKind("Plumbing", java.awt.Color.BLUE),
         WallLayoutKind("Finishing", java.awt.Color.GREEN)
     )
+    /** Asset definitions per kind index: kindIndex → mutable list of AssetDefinition. */
+    val assetDefinitions: MutableMap<Int, MutableList<AssetDefinition>> = mutableMapOf()
     val visibleKinds = mutableSetOf<Int>()
     var addingUtilityKind: Int? = null
 

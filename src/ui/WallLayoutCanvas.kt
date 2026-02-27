@@ -204,6 +204,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         drawRuler(g2)
         drawAxes(g2)
         drawConnections(g2)
+        drawAssetRects(g2)
         drawPoints(g2)
     }
 
@@ -672,6 +673,51 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val label = "${wallWidth.roundToInt()} cm"
         val fm = g2.fontMetrics
         g2.drawString(label, (xStart + xEnd) / 2 - fm.stringWidth(label) / 2, y + 20)
+    }
+
+    private fun drawAssetRects(g2: Graphics2D) {
+        val savedComposite = g2.composite
+        g2.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, 0.35f)
+
+        for (p in doc.layout.points) {
+            if (p.assets.isEmpty()) continue
+            val defs = doc.floorPlanDoc.assetDefinitions[p.kind] ?: continue
+            if (defs.isEmpty()) continue
+
+            // Find the asset definition with the largest physical area assigned to this point
+            var largestWidth = 0.0
+            var largestHeight = 0.0
+            var largestArea = 0.0
+            for (assignment in p.assets) {
+                val def = defs.find { it.name == assignment.assetName } ?: continue
+                if (def.physicalWidth > 0.0 && def.physicalHeight > 0.0) {
+                    val area = def.physicalWidth * def.physicalHeight
+                    if (area > largestArea) {
+                        largestArea = area
+                        largestWidth = def.physicalWidth
+                        largestHeight = def.physicalHeight
+                    }
+                }
+            }
+            if (largestWidth <= 0.0 || largestHeight <= 0.0) continue
+
+            val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind) ?: continue
+            g2.color = kind.color
+
+            val sx1 = doc.modelToScreen(p.x - largestWidth / 2.0, doc.offsetX)
+            val sx2 = doc.modelToScreen(p.x + largestWidth / 2.0, doc.offsetX)
+            // Z increases upward: upper half is at p.z + h/2, lower at p.z - h/2
+            val sy1 = doc.modelToScreen(p.z.toDouble() + largestHeight / 2.0, doc.offsetY, true)
+            val sy2 = doc.modelToScreen(p.z.toDouble() - largestHeight / 2.0, doc.offsetY, true)
+
+            val rx = minOf(sx1, sx2)
+            val ry = minOf(sy1, sy2)
+            val rw = abs(sx1 - sx2)
+            val rh = abs(sy1 - sy2)
+            if (rw > 0 && rh > 0) g2.fillRect(rx, ry, rw, rh)
+        }
+
+        g2.composite = savedComposite
     }
 
     private fun drawPoints(g2: Graphics2D) {

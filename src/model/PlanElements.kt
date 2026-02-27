@@ -9,7 +9,22 @@ import java.io.Serializable
 
 data class WallLayoutKind(var name: String, var color: Color, var diameter: Double = 1.0) : Serializable
 
-data class WallLayoutPoint(var x: Double, var z: Int, var kind: Int, var name: String = "") : Serializable
+data class AssetDefinition(
+    var name: String,
+    var limit: Int,
+    var physicalWidth: Double,
+    var physicalHeight: Double
+) : Serializable
+
+data class AssetAssignment(var assetName: String, var quantity: Int) : Serializable
+
+data class WallLayoutPoint(
+    var x: Double,
+    var z: Int,
+    var kind: Int,
+    var name: String = "",
+    val assets: MutableList<AssetAssignment> = mutableListOf()
+) : Serializable
 
 class WallLayout : Serializable {
     val points = mutableListOf<WallLayoutPoint>()

@@ -50,6 +50,8 @@ class FloorPlanApp {
     private var sidePanelY: Int? = null
     private val MAX_RECENT = 10
 
+    private var assetManagerFrame: JFrame? = null
+
     private val menuBars = mutableListOf<JMenuBar>()
     private val undoMenuItems = mutableListOf<JMenuItem>()
     private val redoMenuItems = mutableListOf<JMenuItem>()
@@ -506,6 +508,11 @@ class FloorPlanApp {
         val manageKindsItem = JMenuItem("Manage Wall Layout Kinds")
         manageKindsItem.addActionListener { showManageKindsDialog() }
         utilitiesMenu.add(manageKindsItem)
+
+        val assetManagerItem = JMenuItem("Asset Manager")
+        assetManagerItem.addActionListener { showAssetManagerDialog() }
+        utilitiesMenu.add(assetManagerItem)
+
         toolsMenu.add(utilitiesMenu)
         
         return menuBar
@@ -2205,6 +2212,279 @@ class FloorPlanApp {
         dialog.isVisible = true
     }
 
+    /** Sum of all asset assignments with [assetName] on utility points of [kindIndex]
+     *  across all currently open floor plan documents. */
+    internal fun computeSpentAssets(kindIndex: Int, assetName: String): Int {
+        var total = 0
+        for (doc in documents) {
+            for (wall in doc.elements.filterIsInstance<Wall>()) {
+                for (p in wall.frontLayout.points + wall.backLayout.points) {
+                    if (p.kind == kindIndex) {
+                        total += p.assets.filter { it.assetName == assetName }.sumOf { it.quantity }
+                    }
+                }
+            }
+        }
+        return total
+    }
+
+    /** Open (or bring to front) the non-modal Asset Manager window. */
+    private fun showAssetManagerDialog() {
+        val existing = assetManagerFrame
+        if (existing != null && existing.isDisplayable) {
+            existing.toFront()
+            return
+        }
+
+        val frame = JFrame("Asset Manager")
+        assetManagerFrame = frame
+        frame.defaultCloseOperation = JFrame.DISPOSE_ON_CLOSE
+        frame.setSize(720, 480)
+        frame.isResizable = true
+        frame.layout = BorderLayout()
+
+        // ── kind selector ────────────────────────────────────────────────
+        val kindComboBox = JComboBox<String>()
+        val docLabel = JLabel("(no document)")
+
+        val tableModel = object : DefaultTableModel(
+            arrayOf("Asset name", "Asset limit", "Asset physical width (cm)",
+                    "Asset physical height (cm)", "Spent assets"), 0
+        ) {
+            override fun isCellEditable(row: Int, column: Int) = column != 4
+        }
+
+        val table = JTable(tableModel)
+        table.putClientProperty("terminateEditOnFocusLost", true)
+
+        // Red text for spent > limit in the Spent column
+        table.columnModel.getColumn(4).cellRenderer = object : javax.swing.table.DefaultTableCellRenderer() {
+            override fun getTableCellRendererComponent(
+                tbl: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int
+            ): java.awt.Component {
+                val comp = super.getTableCellRendererComponent(tbl, value, isSelected, hasFocus, row, col)
+                if (!isSelected) {
+                    val spent = value?.toString()?.toIntOrNull() ?: 0
+                    val limit = tbl?.getValueAt(row, 1)?.toString()?.toIntOrNull() ?: 0
+                    comp.foreground = if (spent > limit) Color.RED else tbl?.foreground
+                } else {
+                    comp.foreground = tbl?.selectionForeground
+                }
+                return comp
+            }
+        }
+
+        // ── helpers to refresh UI from the active document ───────────────
+        var suppressTableListener = false
+
+        fun refreshKinds() {
+            val doc = activeDocument
+            if (doc == null) {
+                docLabel.text = "(no document open)"
+                kindComboBox.removeAllItems()
+                return
+            }
+            docLabel.text = doc.currentFile?.name ?: "Untitled"
+            val sel = kindComboBox.selectedItem
+            kindComboBox.removeAllItems()
+            doc.kinds.forEach { kindComboBox.addItem(it.name) }
+            if (sel != null && kindComboBox.itemCount > 0) kindComboBox.selectedItem = sel
+        }
+
+        fun refreshTable() {
+            val doc = activeDocument ?: run { tableModel.setRowCount(0); return }
+            val kindIdx = kindComboBox.selectedIndex
+            if (kindIdx < 0) { tableModel.setRowCount(0); return }
+            suppressTableListener = true
+            tableModel.setRowCount(0)
+            val defs = doc.assetDefinitions.getOrDefault(kindIdx, mutableListOf())
+            for (def in defs) {
+                val spent = computeSpentAssets(kindIdx, def.name)
+                tableModel.addRow(arrayOf(def.name, def.limit, def.physicalWidth, def.physicalHeight, spent))
+            }
+            suppressTableListener = false
+        }
+
+        // Commit any in-progress cell edit WITHOUT triggering the model listener path.
+        // Must NOT be called from within a TableModelListener callback.
+        fun commitEdit() {
+            if (table.isEditing) table.cellEditor?.stopCellEditing()
+        }
+
+        fun applyTableToDoc() {
+            // NOTE: do NOT call commitEdit() here – this function is invoked from the
+            // TableModelListener which fires synchronously inside editingStopped→setValueAt,
+            // before removeEditor() runs. Calling stopCellEditing() here would recurse
+            // back into editingStopped() and cause a StackOverflowError on the EDT.
+            val doc = activeDocument ?: return
+            val kindIdx = kindComboBox.selectedIndex
+            if (kindIdx < 0) return
+            val defs = mutableListOf<AssetDefinition>()
+            for (i in 0 until tableModel.rowCount) {
+                val name = tableModel.getValueAt(i, 0)?.toString() ?: continue
+                val limit = tableModel.getValueAt(i, 1)?.toString()?.toIntOrNull() ?: 0
+                val w = tableModel.getValueAt(i, 2)?.toString()?.toDoubleOrNull() ?: 0.0
+                val h = tableModel.getValueAt(i, 3)?.toString()?.toDoubleOrNull() ?: 0.0
+                defs.add(AssetDefinition(name, limit, w, h))
+            }
+            doc.assetDefinitions[kindIdx] = defs
+            doc.isModified = true
+        }
+
+        // Apply current edits + refresh spent column
+        fun refreshSpent() {
+            commitEdit()
+            applyTableToDoc()
+            val doc = activeDocument ?: return
+            val kindIdx = kindComboBox.selectedIndex
+            if (kindIdx < 0) return
+            suppressTableListener = true
+            for (i in 0 until tableModel.rowCount) {
+                val name = tableModel.getValueAt(i, 0)?.toString() ?: continue
+                tableModel.setValueAt(computeSpentAssets(kindIdx, name), i, 4)
+            }
+            suppressTableListener = false
+        }
+
+        // ── kind combo listener ──────────────────────────────────────────
+        kindComboBox.addActionListener {
+            commitEdit()
+            applyTableToDoc()
+            refreshTable()
+        }
+
+        // ── table model listener: persist edits live ─────────────────────
+        // Fires inside setValueAt() (before removeEditor()), so we must NOT call
+        // stopCellEditing() here – applyTableToDoc() only reads the model, which is safe.
+        tableModel.addTableModelListener { e ->
+            if (!suppressTableListener && e.type == javax.swing.event.TableModelEvent.UPDATE && e.column in 0..3) {
+                applyTableToDoc()
+            }
+        }
+
+        // ── Enter key: commit current cell edit without jumping into next row ─
+        val enterKey = javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ENTER, 0)
+        table.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(enterKey, "commitAndDeselect")
+        table.actionMap.put("commitAndDeselect", object : javax.swing.AbstractAction() {
+            override fun actionPerformed(e: java.awt.event.ActionEvent?) {
+                // stopCellEditing is safe here: we are NOT inside a model listener callback
+                commitEdit()
+                table.clearSelection()
+            }
+        })
+
+        // ── layout ──────────────────────────────────────────────────────
+        val topPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
+        topPanel.add(JLabel("Document:"))
+        topPanel.add(docLabel)
+        topPanel.add(JLabel("  Kind:"))
+        topPanel.add(kindComboBox)
+        val refreshBtn = JButton("Refresh")
+        refreshBtn.addActionListener { commitEdit(); refreshKinds(); refreshTable() }
+        val refreshSpentBtn = JButton("Refresh Spent")
+        refreshSpentBtn.addActionListener { refreshSpent() }
+        topPanel.add(refreshBtn)
+        topPanel.add(refreshSpentBtn)
+
+        val btnPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
+        val addBtn = JButton("Add Asset")
+        addBtn.addActionListener {
+            commitEdit()
+            tableModel.addRow(arrayOf("New Asset", 0, 0.0, 0.0, 0))
+            applyTableToDoc()
+        }
+        val removeBtn = JButton("Remove Asset")
+        removeBtn.addActionListener {
+            commitEdit()
+            val row = table.selectedRow
+            if (row >= 0) { tableModel.removeRow(row); applyTableToDoc() }
+        }
+        btnPanel.add(addBtn)
+        btnPanel.add(removeBtn)
+
+        frame.add(topPanel, BorderLayout.NORTH)
+        frame.add(JScrollPane(table), BorderLayout.CENTER)
+        frame.add(btnPanel, BorderLayout.SOUTH)
+
+        frame.addWindowListener(object : java.awt.event.WindowAdapter() {
+            override fun windowClosing(e: java.awt.event.WindowEvent) { commitEdit(); applyTableToDoc() }
+        })
+
+        refreshKinds()
+        refreshTable()
+        frame.setLocationRelativeTo(activeWindow)
+        frame.isVisible = true
+    }
+
+    /** Modal "Modify Assets" dialog for a single WallLayoutPoint. */
+    internal fun showModifyAssetsDialog(
+        point: WallLayoutPoint,
+        kindIndex: Int,
+        floorPlanDoc: FloorPlanDocument,
+        parentWindow: JFrame?
+    ) {
+        val kindName = floorPlanDoc.kinds.getOrNull(kindIndex)?.name ?: "Kind $kindIndex"
+        val dialog = JDialog(parentWindow, "Modify Assets – $kindName", true)
+        dialog.layout = BorderLayout()
+        dialog.setSize(420, 340)
+        dialog.setLocationRelativeTo(parentWindow)
+
+        val defs = floorPlanDoc.assetDefinitions.getOrDefault(kindIndex, mutableListOf())
+
+        val tableModel = object : DefaultTableModel(arrayOf("Asset name", "Quantity"), 0) {
+            override fun isCellEditable(row: Int, column: Int) = true
+        }
+        for (a in point.assets) tableModel.addRow(arrayOf(a.assetName, a.quantity))
+
+        val table = JTable(tableModel)
+        table.putClientProperty("terminateEditOnFocusLost", true)
+
+        // Asset-name column: combo box with known asset names for this kind
+        if (defs.isNotEmpty()) {
+            val nameCombo = JComboBox(defs.map { it.name }.toTypedArray())
+            table.columnModel.getColumn(0).cellEditor = DefaultCellEditor(nameCombo)
+        }
+
+        val btnPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
+        val addBtn = JButton("Add")
+        addBtn.addActionListener {
+            val defaultName = defs.firstOrNull()?.name ?: ""
+            tableModel.addRow(arrayOf(defaultName, 1))
+        }
+        val removeBtn = JButton("Remove")
+        removeBtn.addActionListener { if (table.selectedRow >= 0) tableModel.removeRow(table.selectedRow) }
+        btnPanel.add(addBtn)
+        btnPanel.add(removeBtn)
+
+        val okCancelPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT))
+        val okBtn = JButton("OK")
+        okBtn.addActionListener {
+            if (table.isEditing) table.cellEditor?.stopCellEditing()
+            point.assets.clear()
+            for (i in 0 until tableModel.rowCount) {
+                val name = tableModel.getValueAt(i, 0)?.toString() ?: continue
+                val qty = tableModel.getValueAt(i, 1)?.toString()?.toIntOrNull() ?: 0
+                if (name.isNotEmpty() && qty > 0) point.assets.add(AssetAssignment(name, qty))
+            }
+            floorPlanDoc.isModified = true
+            (floorPlanDoc.window as? EditorWindow)?.updateTitle()
+            repaintAllCanvases()
+            dialog.dispose()
+        }
+        val cancelBtn = JButton("Cancel")
+        cancelBtn.addActionListener { dialog.dispose() }
+        okCancelPanel.add(okBtn)
+        okCancelPanel.add(cancelBtn)
+
+        val southPanel = JPanel(BorderLayout())
+        southPanel.add(btnPanel, BorderLayout.WEST)
+        southPanel.add(okCancelPanel, BorderLayout.EAST)
+
+        dialog.add(JScrollPane(table), BorderLayout.CENTER)
+        dialog.add(southPanel, BorderLayout.SOUTH)
+        dialog.isVisible = true
+    }
+
     internal fun updateUndoRedoStates() {
         activeDocument?.let { doc ->
             for (undoMenuItem in undoMenuItems) {
@@ -2307,6 +2587,29 @@ class FloorPlanApp {
         }
     }
 
+    /** Read `<AssetDefinitions>` from [xmlDoc] and populate [doc.assetDefinitions]. */
+    private fun loadAssetDefinitions(xmlDoc: org.w3c.dom.Document, doc: FloorPlanDocument) {
+        val topNodes = xmlDoc.getElementsByTagName("AssetDefinitions")
+        if (topNodes.length == 0) return
+        val topEl = topNodes.item(0) as Element
+        val kindAssetsNodes = topEl.getElementsByTagName("KindAssets")
+        for (i in 0 until kindAssetsNodes.length) {
+            val kaEl = kindAssetsNodes.item(i) as Element
+            val kindIdx = kaEl.getAttribute("kind").toIntOrNull() ?: continue
+            val defs = mutableListOf<AssetDefinition>()
+            val defNodes = kaEl.getElementsByTagName("AssetDef")
+            for (j in 0 until defNodes.length) {
+                val defEl = defNodes.item(j) as Element
+                val name = defEl.getAttribute("name")
+                val limit = defEl.getAttribute("limit").toIntOrNull() ?: 0
+                val w = defEl.getAttribute("width").toDoubleOrNull() ?: 0.0
+                val h = defEl.getAttribute("height").toDoubleOrNull() ?: 0.0
+                defs.add(AssetDefinition(name, limit, w, h))
+            }
+            if (defs.isNotEmpty()) doc.assetDefinitions[kindIdx] = defs
+        }
+    }
+
     private fun performSave(file: File) {
         activeDocument?.let { doc ->
             try {
@@ -2324,7 +2627,27 @@ class FloorPlanApp {
                     kNode.setAttribute("diameter", kind.diameter.toString())
                     rootElement.appendChild(kNode)
                 }
-                
+
+                // Save asset definitions per kind
+                if (doc.assetDefinitions.isNotEmpty()) {
+                    val assetDefsNode = xmlDoc.createElement("AssetDefinitions")
+                    for ((kindIdx, defs) in doc.assetDefinitions) {
+                        if (defs.isEmpty()) continue
+                        val kindAssetsNode = xmlDoc.createElement("KindAssets")
+                        kindAssetsNode.setAttribute("kind", kindIdx.toString())
+                        for (def in defs) {
+                            val defNode = xmlDoc.createElement("AssetDef")
+                            defNode.setAttribute("name", def.name)
+                            defNode.setAttribute("limit", def.limit.toString())
+                            defNode.setAttribute("width", def.physicalWidth.toString())
+                            defNode.setAttribute("height", def.physicalHeight.toString())
+                            kindAssetsNode.appendChild(defNode)
+                        }
+                        assetDefsNode.appendChild(kindAssetsNode)
+                    }
+                    rootElement.appendChild(assetDefsNode)
+                }
+
                 for (el in doc.elements) {
                     val elNode = xmlDoc.createElement("Element")
                     elNode.setAttribute("type", el.type.name)
@@ -2347,6 +2670,13 @@ class FloorPlanApp {
                                     pNode.setAttribute("z", p.z.toString())
                                     pNode.setAttribute("kind", p.kind.toString())
                                     if (p.name.isNotEmpty()) pNode.setAttribute("name", p.name)
+                                    // Persist asset assignments
+                                    for (a in p.assets) {
+                                        val aNode = xmlDoc.createElement("Assignment")
+                                        aNode.setAttribute("assetName", a.assetName)
+                                        aNode.setAttribute("quantity", a.quantity.toString())
+                                        pNode.appendChild(aNode)
+                                    }
                                     layoutNode.appendChild(pNode)
                                 }
                                 elNode.appendChild(layoutNode)
@@ -2456,7 +2786,16 @@ class FloorPlanApp {
                                     val pz = pElement.getAttribute("z").toDouble().roundToInt()
                                     val pk = pElement.getAttribute("kind").toInt()
                                     val pn = if (pElement.hasAttribute("name")) pElement.getAttribute("name") else ""
-                                    layout.points.add(WallLayoutPoint(px, pz, pk, pn))
+                                    val point = WallLayoutPoint(px, pz, pk, pn)
+                                    // Load asset assignments
+                                    val assignNodes = pElement.getElementsByTagName("Assignment")
+                                    for (k in 0 until assignNodes.length) {
+                                        val aEl = assignNodes.item(k) as Element
+                                        val aName = aEl.getAttribute("assetName")
+                                        val qty = aEl.getAttribute("quantity").toIntOrNull() ?: 0
+                                        if (aName.isNotEmpty()) point.assets.add(AssetAssignment(aName, qty))
+                                    }
+                                    layout.points.add(point)
                                 }
                                 layout.isAbsolute = true
                             }
@@ -2575,12 +2914,13 @@ class FloorPlanApp {
                                 floorDoc.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
                             }
                         }
+                        loadAssetDefinitions(floorXmlDoc, floorDoc)
                         floors.add(FloorInfo(floorDoc, height))
                     } else {
                         JOptionPane.showMessageDialog(null, "Floor plan file not found: $path")
                     }
                 }
-                
+
                 if (floors.isNotEmpty()) {
                     generate3DModel(floors)
                     val doc3d = threeDDocuments.last()
@@ -2624,9 +2964,10 @@ class FloorPlanApp {
                 }
             }
 
+            loadAssetDefinitions(xmlDoc, doc)
             doc.elements.addAll(newElements)
             doc.currentFile = file
-            
+
             if (savedState != null) {
                 doc.scale = savedState.scale
                 doc.offsetX = savedState.offsetX
