@@ -222,7 +222,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
 
         for ((kindIdx, points) in pointsByKind) {
             if (points.size < 2) continue
-            val kind = doc.floorPlanDoc.kinds.getOrNull(kindIdx)
+            val kind = doc.floorPlanDoc.effectiveKinds.getOrNull(kindIdx)
             g2.color = kind?.color ?: Color.BLACK
             val edges = computeManhattanMST(points)
             for ((p1, p2) in edges) {
@@ -681,7 +681,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
 
         for (p in doc.layout.points) {
             if (p.assets.isEmpty()) continue
-            val defs = doc.floorPlanDoc.assetDefinitions[p.kind] ?: continue
+            val defs = doc.floorPlanDoc.effectiveAssetDefinitions[p.kind] ?: continue
             if (defs.isEmpty()) continue
 
             // Find the asset definition with the largest physical area assigned to this point
@@ -701,7 +701,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             }
             if (largestWidth <= 0.0 || largestHeight <= 0.0) continue
 
-            val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind) ?: continue
+            val kind = doc.floorPlanDoc.effectiveKinds.getOrNull(p.kind) ?: continue
             g2.color = kind.color
 
             val sx1 = doc.modelToScreen(p.x - largestWidth / 2.0, doc.offsetX)
@@ -729,7 +729,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             val sx = doc.modelToScreen(p.x, doc.offsetX)
             val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
 
-            val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
+            val kind = doc.floorPlanDoc.effectiveKinds.getOrNull(p.kind)
             g2.color = kind?.color ?: Color.BLACK
 
             g2.fillOval(sx - pointRadius, sy - pointRadius, pointRadius * 2, pointRadius * 2)
@@ -761,7 +761,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
             val sx = doc.modelToScreen(p.x, doc.offsetX)
             val sy = doc.modelToScreen(p.z.toDouble(), doc.offsetY, true)
 
-            val kind = doc.floorPlanDoc.kinds.getOrNull(p.kind)
+            val kind = doc.floorPlanDoc.effectiveKinds.getOrNull(p.kind)
             val baseColor = kind?.color ?: Color.BLACK
             // Use semi-transparent color for docked ghost points
             g2.color = Color(baseColor.red, baseColor.green, baseColor.blue, 128)

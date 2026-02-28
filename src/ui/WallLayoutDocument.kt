@@ -156,6 +156,10 @@ class WallLayoutDocument(
         redoStack.clear()
         isModified = true
         window?.updateTitle()
+        floorPlanDoc.ambientHouseDoc?.let { houseDoc ->
+            houseDoc.isModified = true
+            houseDoc.window?.title = "3D House Model - ${houseDoc.currentFile?.name ?: "Untitled"}*"
+        }
     }
 
     fun undo() {

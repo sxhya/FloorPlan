@@ -45,7 +45,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     private val polygonTable = PropertyTable(polygonTableModel)
 
     private val threeDSidePanel = JPanel(BorderLayout())
-    private val threeDTableModel = object : DefaultTableModel(arrayOf("Floor Plan", "Height (cm)", "Draw"), 0) {
+    private val threeDTableModel = object : DefaultTableModel(arrayOf("Floor Name", "Height (cm)", "Draw"), 0) {
         override fun isCellEditable(row: Int, column: Int): Boolean = true
         
         override fun getColumnClass(columnIndex: Int): Class<*> {
@@ -95,13 +95,28 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         setupFloorPlanComboBox()
         threeDTable.columnModel.getColumn(2).cellRenderer = threeDTable.getDefaultRenderer(Boolean::class.javaObjectType)
         threeDTable.columnModel.getColumn(2).cellEditor = threeDTable.getDefaultEditor(Boolean::class.javaObjectType)
-        
+
         threeDTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
                 applyThreeDChanges(e.firstRow, e.column)
             }
         }
         threeDSidePanel.add(JScrollPane(threeDTable), BorderLayout.CENTER)
+
+        // "Edit Floor" button in the south of the 3D side panel
+        val editFloorBtn = JButton("Edit Floor")
+        editFloorBtn.addActionListener {
+            val doc = currentThreeDDoc ?: return@addActionListener
+            val selectedRow = threeDTable.selectedRow
+            if (selectedRow >= 0) {
+                app.openEmbeddedFloorEditor(doc, selectedRow)
+            } else {
+                JOptionPane.showMessageDialog(this, "Please select a floor row to edit.")
+            }
+        }
+        val editFloorPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
+        editFloorPanel.add(editFloorBtn)
+        threeDSidePanel.add(editFloorPanel, BorderLayout.SOUTH)
 
         val polygonPopup = JPopupMenu()
         val duplicateMarkerItem = JMenuItem("Duplicate Marker")
@@ -263,7 +278,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             dimensionTableModel.addRow(arrayOf("Name", p.name))
             dimensionTableModel.addRow(arrayOf("X", p.x))
             dimensionTableModel.addRow(arrayOf("Z", p.z))
-            val kindName = doc.floorPlanDoc.kinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
+            val kindName = doc.floorPlanDoc.effectiveKinds.getOrNull(p.kind)?.name ?: "Kind ${p.kind}"
             dimensionTableModel.addRow(arrayOf("Kind", kindName))
             // Show the "Assets" button for this point
             currentWallPoint = p
@@ -315,7 +330,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         }
         if (el is UtilitiesConnection) {
             val doc = app.activeDocument ?: return
-            dimensionTableModel.addRow(arrayOf("Kind", doc.kinds.getOrNull(el.kind)?.name ?: "Kind ${el.kind}"))
+            dimensionTableModel.addRow(arrayOf("Kind", doc.effectiveKinds.getOrNull(el.kind)?.name ?: "Kind ${el.kind}"))
             dimensionTableModel.addRow(arrayOf("Start Point", formatPoint(el.startPoint, el.startWall, el.startIsFront)))
             dimensionTableModel.addRow(arrayOf("End Point", formatPoint(el.endPoint, el.endWall, el.endIsFront)))
         }
@@ -405,7 +420,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 kindComboBox.removeAllItems()
                 val wallLayoutWindow = app.activeWindow as? ui.WallLayoutWindow
                 val doc = wallLayoutWindow?.doc?.floorPlanDoc ?: app.activeDocument
-                doc?.kinds?.forEach {
+                doc?.effectiveKinds?.forEach {
                     kindComboBox.addItem(it.name)
                 }
                 return super.getTableCellEditorComponent(table, value, isSelected, row, column)
@@ -590,38 +605,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     }
 
     private fun setupFloorPlanComboBox() {
-        val comboBox = JComboBox<String>()
-        comboBox.addActionListener {
-            if (threeDTable.isEditing) {
-                threeDTable.cellEditor?.stopCellEditing()
-            }
-        }
-        val editor = object : DefaultCellEditor(comboBox) {
-            override fun getTableCellEditorComponent(
-                table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int
-            ): Component {
-                comboBox.removeAllItems()
-                app.getOpenDocuments().forEach { doc ->
-                    val name = doc.currentFile?.absolutePath ?: "Untitled"
-                    comboBox.addItem(name)
-                }
-                val currentValue = value?.toString() ?: ""
-                if (currentValue.isNotEmpty() && (0 until comboBox.itemCount).none { comboBox.getItemAt(it) == currentValue }) {
-                    comboBox.addItem(currentValue)
-                }
-                comboBox.selectedItem = value
-                return super.getTableCellEditorComponent(table, value, isSelected, row, column)
-            }
-
-            override fun stopCellEditing(): Boolean {
-                val row = threeDTable.editingRow
-                if (row != -1) {
-                    threeDTable.setValueAt(comboBox.selectedItem, row, 0)
-                }
-                return super.stopCellEditing()
-            }
-        }
-        threeDTable.columnModel.getColumn(0).cellEditor = editor
+        // Floor name is now a plain text field (floor is embedded, no file path needed)
         threeDTable.columnModel.getColumn(0).preferredWidth = 150
         threeDTable.columnModel.getColumn(1).preferredWidth = 80
         threeDTable.columnModel.getColumn(2).preferredWidth = 50
@@ -632,7 +616,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         isUpdatingFields = true
         currentThreeDDoc = doc
         for (floor in doc.floors) {
-            threeDTableModel.addRow(arrayOf(floor.filePath, floor.height, floor.draw))
+            threeDTableModel.addRow(arrayOf(floor.name, floor.height, floor.draw))
         }
         add(threeDSidePanel, BorderLayout.CENTER)
         revalidate()
@@ -646,11 +630,10 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         val floor = doc.floors[row]
         when (column) {
             0 -> {
-                val newPath = threeDTableModel.getValueAt(row, 0)?.toString() ?: return
-                if (newPath != floor.filePath) {
-                    doc.floors[row] = ThreeDDocument.FloorData(newPath, floor.height, floor.draw)
+                val newName = threeDTableModel.getValueAt(row, 0)?.toString() ?: return
+                if (newName != floor.name) {
+                    floor.name = newName
                     doc.isModified = true
-                    app.regenerate3DModelFromFloors(doc)
                 }
             }
             1 -> {
@@ -803,7 +786,7 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                 }
             }
             "Kind" -> {
-                val kindIndex = doc.floorPlanDoc.kinds.indexOfFirst { it.name == newVal.toString() }
+                val kindIndex = doc.floorPlanDoc.effectiveKinds.indexOfFirst { it.name == newVal.toString() }
                 if (kindIndex != -1 && p.kind != kindIndex) {
                     doc.saveState()
                     p.kind = kindIndex

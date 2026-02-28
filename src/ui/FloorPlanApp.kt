@@ -50,7 +50,6 @@ class FloorPlanApp {
     private var sidePanelY: Int? = null
     private val MAX_RECENT = 10
 
-    private var assetManagerFrame: JFrame? = null
 
     private val menuBars = mutableListOf<JMenuBar>()
     private val undoMenuItems = mutableListOf<JMenuItem>()
@@ -117,6 +116,38 @@ class FloorPlanApp {
     }
 
     fun closeDocument(doc: FloorPlanDocument, saveImmediately: Boolean = true) {
+        // If this floor doc is embedded in a house plan, just close the window
+        // without removing it from the house or asking to save separately
+        val houseDoc = doc.ambientHouseDoc
+        if (houseDoc != null) {
+            doc.window?.jMenuBar?.let { bar ->
+                menuBars.remove(bar)
+                for (i in 0 until bar.menuCount) {
+                    val menu = bar.getMenu(i)
+                    if (menu?.text == "File") {
+                        for (j in 0 until menu.itemCount) {
+                            val item = menu.getItem(j)
+                            if (item is JMenu && item.text == "Recent Files") recentMenus.remove(item)
+                        }
+                    }
+                    if (menu?.text == "Edit") {
+                        for (j in 0 until menu.itemCount) {
+                            val item = menu.getItem(j)
+                            if (item?.text == "Undo") undoMenuItems.remove(item)
+                            if (item?.text == "Redo") redoMenuItems.remove(item)
+                        }
+                    }
+                }
+            }
+            documents.remove(doc)
+            if (activeDocument == doc) activeDocument = null
+            if (activeWindow == doc.window) activeWindow = null
+            doc.window?.dispose()
+            // Regenerate 3D model now that the floor has been edited
+            regenerate3DModelFromFloors(houseDoc)
+            return
+        }
+
         if (doc.isModified) {
             val result = JOptionPane.showConfirmDialog(
                 doc.window,
@@ -135,7 +166,7 @@ class FloorPlanApp {
                 else -> return // Cancel
             }
         }
-        
+
         doc.window?.jMenuBar?.let { bar ->
             menuBars.remove(bar)
             // Also need to remove menus and items from lists to avoid memory leaks/updates to closed windows
@@ -531,7 +562,7 @@ class FloorPlanApp {
 
         val tableModel = DefaultTableModel(arrayOf("Floor", "Document", "Height (cm)"), 0)
         val table = JTable(tableModel)
-        
+
         fun updateRows() {
             val count = floorCountSpinner.value as Int
             val currentRows = tableModel.rowCount
@@ -545,7 +576,7 @@ class FloorPlanApp {
                 }
             }
         }
-        
+
         updateRows()
         floorCountSpinner.addChangeListener { updateRows() }
 
@@ -558,17 +589,37 @@ class FloorPlanApp {
 
         val okBtn = JButton("OK")
         okBtn.addActionListener {
-            val floors = mutableListOf<FloorInfo>()
+            if (table.isEditing) table.cellEditor?.stopCellEditing()
+            val doc3d = ThreeDDocument(this)
+            var firstSourceDoc: FloorPlanDocument? = null
+
             for (i in 0 until tableModel.rowCount) {
                 val docName = tableModel.getValueAt(i, 1) as String
                 val height = tableModel.getValueAt(i, 2).toString().toDouble().toInt()
-                val doc = documents.find { (it.currentFile?.name ?: "Untitled") == docName }
-                if (doc != null) {
-                    floors.add(FloorInfo(doc, height))
+                val sourceDoc = documents.find { (it.currentFile?.name ?: "Untitled") == docName }
+                if (sourceDoc != null) {
+                    if (firstSourceDoc == null) firstSourceDoc = sourceDoc
+                    val embeddedFloorDoc = FloorPlanDocument(this)
+                    embeddedFloorDoc.elements.addAll(sourceDoc.cloneElements(sourceDoc.elements))
+                    embeddedFloorDoc.ambientHouseDoc = doc3d
+                    val floorData = ThreeDDocument.FloorData("Floor ${i + 1}", height, true, embeddedFloorDoc)
+                    doc3d.floors.add(floorData)
                 }
             }
-            if (floors.isNotEmpty()) {
-                generate3DModel(floors)
+
+            if (doc3d.floors.isNotEmpty()) {
+                if (firstSourceDoc != null) {
+                    doc3d.kinds.clear()
+                    doc3d.kinds.addAll(firstSourceDoc.kinds.map { it.copy() })
+                    firstSourceDoc.assetDefinitions.forEach { (k, v) ->
+                        doc3d.assetDefinitions[k] = v.map { it.copy() }.toMutableList()
+                    }
+                }
+                doc3d.model = buildModel3D(doc3d)
+                doc3d.isModified = true
+                threeDDocuments.add(doc3d)
+                val window = ThreeDWindow(this, doc3d)
+                window.jMenuBar = createMenuBar()
                 dialog.dispose()
             } else {
                 JOptionPane.showMessageDialog(dialog, "Please select documents for floors.")
@@ -576,738 +627,6 @@ class FloorPlanApp {
         }
         dialog.add(okBtn, BorderLayout.SOUTH)
         dialog.isVisible = true
-    }
-
-    private data class FloorInfo(val doc: FloorPlanDocument, val height: Int)
-
-    private fun generate3DModel(floors: List<FloorInfo>) {
-        val model3d = model.Model3D()
-        
-        // Find the largest conjoined room space across all floors
-        var largestGroup: List<Room>? = null
-        var maxGroupArea = -1.0
-        var groupFloorIndex = 0
-        var groupZOffset = 0.0
-
-        var runningZ = 0.0
-        for ((idx, floor) in floors.withIndex()) {
-            val rooms = floor.doc.elements.filterIsInstance<Room>()
-            val polygonRooms = floor.doc.elements.filterIsInstance<PolygonRoom>()
-            if (rooms.isNotEmpty()) {
-                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
-                for (i in rooms.indices) {
-                    for (j in i + 1 until rooms.size) {
-                        val r1 = rooms[i]
-                        val r2 = rooms[j]
-                        if (areAdjacentRooms(r1, r2)) {
-                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
-                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
-                        }
-                    }
-                }
-
-                val visited = mutableSetOf<Room>()
-                for (room in rooms) {
-                    if (room !in visited) {
-                        val group = mutableListOf<Room>()
-                        val queue: java.util.Queue<Room> = java.util.LinkedList()
-                        queue.add(room)
-                        visited.add(room)
-                        while (queue.isNotEmpty()) {
-                            val r = queue.poll()
-                            group.add(r)
-                            adjacency[r]?.forEach { neighbor ->
-                                if (neighbor !in visited) {
-                                    visited.add(neighbor)
-                                    queue.add(neighbor)
-                                }
-                            }
-                        }
-                        // Calculate area of rooms in the component
-                        var groupArea = group.sumOf { it.width.toDouble() * it.height.toDouble() }
-                        
-                        // Add area of all polygon rooms docked to any room in this component
-                        for (pr in polygonRooms) {
-                            if (group.any { room -> isPolygonRoomDockedToRoom(pr, room) }) {
-                                groupArea += pr.getArea()
-                            }
-                        }
-                        
-                        if (groupArea > maxGroupArea) {
-                            maxGroupArea = groupArea
-                            largestGroup = group
-                            groupFloorIndex = idx
-                            groupZOffset = runningZ
-                        }
-                    }
-                }
-            }
-            runningZ += floor.height.toDouble()
-        }
-
-        var currentZ = 0.0
-        val doc3d = ThreeDDocument(this)
-        for (floor in floors) {
-            val floorPath = floor.doc.currentFile?.absolutePath ?: ""
-            doc3d.floors.add(ThreeDDocument.FloorData(floorPath, floor.height))
-
-            val floorHeight = floor.height.toDouble()
-            val roomsOnFloor = floor.doc.elements.filterIsInstance<Room>()
-            
-            // Compute light positions based on dockedness components
-            // Only consider rooms without zOffset (raised rooms don't get light sources)
-            val roomsWithoutOffset = roomsOnFloor.filter { it.zOffset == 0 }
-            if (roomsWithoutOffset.isNotEmpty()) {
-                // Z coordinate: center height of this floor (including offset from floors below)
-                val centerZ = currentZ + floorHeight / 2.0
-                
-                // Build adjacency map for rooms on this floor (only non-raised rooms)
-                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
-                for (i in roomsWithoutOffset.indices) {
-                    for (j in i + 1 until roomsWithoutOffset.size) {
-                        val r1 = roomsWithoutOffset[i]
-                        val r2 = roomsWithoutOffset[j]
-                        if (areAdjacentRooms(r1, r2)) {
-                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
-                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
-                        }
-                    }
-                }
-                
-                // Find all dockedness components (connected room groups)
-                val visited = mutableSetOf<Room>()
-                for (room in roomsWithoutOffset) {
-                    if (room !in visited) {
-                        val component = mutableListOf<Room>()
-                        val queue: java.util.Queue<Room> = java.util.LinkedList()
-                        queue.add(room)
-                        visited.add(room)
-                        while (queue.isNotEmpty()) {
-                            val r = queue.poll()
-                            component.add(r)
-                            adjacency[r]?.forEach { neighbor ->
-                                if (neighbor !in visited) {
-                                    visited.add(neighbor)
-                                    queue.add(neighbor)
-                                }
-                            }
-                        }
-                        
-                        // Find the largest room in this dockedness component
-                        val largestRoom = component.maxByOrNull { it.width.toDouble() * it.height.toDouble() }
-                        if (largestRoom != null) {
-                            // X, Y coordinates: center of the largest room
-                            val centerX = largestRoom.x.toDouble() + largestRoom.width.toDouble() / 2.0
-                            val centerY = largestRoom.y.toDouble() + largestRoom.height.toDouble() / 2.0
-                            
-                            // Add ONE light source per dockedness component
-                            model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
-                        }
-                    }
-                }
-            }
-
-            for (el in floor.doc.elements) {
-                when (el) {
-                    is Room -> {
-                        // Create a floor slab for the room
-                        val x1 = el.x.toDouble()
-                        val y1 = el.y.toDouble()
-                        val x2 = (el.x + el.width).toDouble()
-                        val y2 = (el.y + el.height).toDouble()
-                        val thickness = el.floorThickness.toDouble()
-                        val zOff = el.zOffset.toDouble()
-                        val slabTopZ = currentZ + zOff
-                        val slabBottomZ = slabTopZ - thickness
-                        
-                        // Check which edges are shared with other rooms to avoid Z-fighting on side faces
-                        val otherRooms = roomsOnFloor.filter { it !== el }
-                        val hasAdjacentTop = otherRooms.any { other ->
-                            // Another room shares the top edge (y1) of this room
-                            other.y + other.height == el.y && 
-                            other.x < el.x + el.width && other.x + other.width > el.x
-                        }
-                        val hasAdjacentBottom = otherRooms.any { other ->
-                            // Another room shares the bottom edge (y2) of this room
-                            other.y == el.y + el.height && 
-                            other.x < el.x + el.width && other.x + other.width > el.x
-                        }
-                        val hasAdjacentLeft = otherRooms.any { other ->
-                            // Another room shares the left edge (x1) of this room
-                            other.x + other.width == el.x && 
-                            other.y < el.y + el.height && other.y + other.height > el.y
-                        }
-                        val hasAdjacentRight = otherRooms.any { other ->
-                            // Another room shares the right edge (x2) of this room
-                            other.x == el.x + el.width && 
-                            other.y < el.y + el.height && other.y + other.height > el.y
-                        }
-                        
-                        // Top face (floor surface at slabTopZ)
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x1, y1, slabTopZ), Vector3D(x2, y1, slabTopZ),
-                            Vector3D(x2, y2, slabTopZ), Vector3D(x1, y2, slabTopZ),
-                            Color.LIGHT_GRAY
-                        ))
-                        // Bottom face (slab bottom at slabBottomZ)
-                        model3d.rects.add(Rect3D(
-                            Vector3D(x1, y1, slabBottomZ), Vector3D(x2, y1, slabBottomZ),
-                            Vector3D(x2, y2, slabBottomZ), Vector3D(x1, y2, slabBottomZ),
-                            Color.LIGHT_GRAY
-                        ))
-                        // Side faces - only add if not adjacent to another room on that edge
-                        if (!hasAdjacentTop) {
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, y1, slabBottomZ), Vector3D(x2, y1, slabBottomZ),
-                                Vector3D(x2, y1, slabTopZ), Vector3D(x1, y1, slabTopZ),
-                                Color.LIGHT_GRAY
-                            ))
-                        }
-                        if (!hasAdjacentRight) {
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x2, y1, slabBottomZ), Vector3D(x2, y2, slabBottomZ),
-                                Vector3D(x2, y2, slabTopZ), Vector3D(x2, y1, slabTopZ),
-                                Color.LIGHT_GRAY
-                            ))
-                        }
-                        if (!hasAdjacentBottom) {
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x2, y2, slabBottomZ), Vector3D(x1, y2, slabBottomZ),
-                                Vector3D(x1, y2, slabTopZ), Vector3D(x2, y2, slabTopZ),
-                                Color.LIGHT_GRAY
-                            ))
-                        }
-                        if (!hasAdjacentLeft) {
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, y2, slabBottomZ), Vector3D(x1, y1, slabBottomZ),
-                                Vector3D(x1, y1, slabTopZ), Vector3D(x1, y2, slabTopZ),
-                                Color.LIGHT_GRAY
-                            ))
-                        }
-                    }
-                    is PolygonRoom -> {
-                        // Create a polygonal floor slab for the polygon room
-                        val thickness = el.floorThickness.toDouble()
-                        val zOff = el.zOffset.toDouble()
-                        val slabTopZ = currentZ + zOff
-                        val slabBottomZ = slabTopZ - thickness
-                        val vertices = el.vertices
-                        
-                        if (vertices.size >= 3) {
-                            // Create top and bottom faces using triangle fan from centroid
-                            val centroidX = vertices.sumOf { it.x.toDouble() } / vertices.size
-                            val centroidY = vertices.sumOf { it.y.toDouble() } / vertices.size
-                            
-                            for (i in vertices.indices) {
-                                val v1 = vertices[i]
-                                val v2 = vertices[(i + 1) % vertices.size]
-                                
-                                // Top face triangle
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(centroidX, centroidY, slabTopZ),
-                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
-                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabTopZ),
-                                    Color.LIGHT_GRAY
-                                ))
-                                
-                                // Bottom face triangle (reversed winding)
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(centroidX, centroidY, slabBottomZ),
-                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
-                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabBottomZ),
-                                    Color.LIGHT_GRAY
-                                ))
-                                
-                                // Side face (quad as two triangles)
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
-                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabBottomZ),
-                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
-                                    Color.LIGHT_GRAY
-                                ))
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(v1.x.toDouble(), v1.y.toDouble(), slabTopZ),
-                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabBottomZ),
-                                    Vector3D(v2.x.toDouble(), v2.y.toDouble(), slabTopZ),
-                                    Color.LIGHT_GRAY
-                                ))
-                            }
-                        }
-                    }
-                    is Wall -> {
-                        val wallBounds = el.getBounds()
-                        val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
-                            .filter { wallBounds.contains(it.getBounds()) }
-                        
-                        // Check if there's a floor above and if any room on that floor fully contains this wall
-                        // If so, reduce wall height by that room's floor thickness
-                        val currentFloorIndex = floors.indexOf(floor)
-                        var wallTopReduction = 0.0
-                        if (currentFloorIndex < floors.size - 1) {
-                            val floorAbove = floors[currentFloorIndex + 1]
-                            val roomsAbove = floorAbove.doc.elements.filterIsInstance<Room>()
-                            // Check if any room on the floor above fully contains the wall
-                            for (roomAbove in roomsAbove) {
-                                val roomBounds = roomAbove.getBounds()
-                                if (roomBounds.contains(wallBounds)) {
-                                    // Wall is fully under this room, reduce height by floor thickness
-                                    wallTopReduction = roomAbove.floorThickness.toDouble()
-                                    break
-                                }
-                            }
-                        }
-                        val effectiveWallTop = currentZ + floorHeight - wallTopReduction
-                        
-                        fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
-                            if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
-                            // Bottom
-                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x1, y2, z1), color))
-                            // Top
-                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z2), Vector3D(x2, y1, z2), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
-                            // Front
-                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y1, z2), Vector3D(x1, y1, z2), color))
-                            // Back
-                            model3d.rects.add(Rect3D(Vector3D(x1, y2, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x1, y2, z2), color))
-                            // Left
-                            model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x1, y2, z1), Vector3D(x1, y2, z2), Vector3D(x1, y1, z2), color))
-                            // Right
-                            model3d.rects.add(Rect3D(Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x2, y2, z2), Vector3D(x2, y1, z2), color))
-                        }
-
-                        if (openings.isEmpty()) {
-                            addBox(el.x.toDouble(), el.y.toDouble(), (el.x + el.width).toDouble(), (el.y + el.height).toDouble(), currentZ, effectiveWallTop, Color.DARK_GRAY)
-                        } else {
-                            val isVertical = el.width < el.height
-                            if (isVertical) {
-                                // Wall is along Y axis
-                                val x1 = el.x.toDouble()
-                                val x2 = (el.x + el.width).toDouble()
-                                var lastY = el.y.toDouble()
-                                val sortedOpenings = openings.sortedBy { it.y }
-                                for (op in sortedOpenings) {
-                                    val opY1 = op.y.toDouble()
-                                    val opY2 = (op.y + op.height).toDouble()
-                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
-                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
-                                    
-                                    // Part before opening
-                                    addBox(x1, lastY, x2, opY1, currentZ, effectiveWallTop, Color.DARK_GRAY)
-                                    // Part above opening
-                                    addBox(x1, opY1, x2, opY2, opZ2, effectiveWallTop, Color.DARK_GRAY)
-                                    // Part below opening
-                                    addBox(x1, opY1, x2, opY2, currentZ, opZ1, Color.DARK_GRAY)
-                                    
-                                    // Generate window frame for windows
-                                    if (op is PlanWindow) {
-                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
-                                        val windowPos = op.windowPosition
-                                        
-                                        // Determine which edge to place the window frame based on WindowPosition
-                                        val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
-                                        
-                                        // Create window frame as a thin rectangle (cylinder over the edge line)
-                                        model3d.rects.add(Rect3D(
-                                            Vector3D(frameX, opY1, opZ1),
-                                            Vector3D(frameX, opY2, opZ1),
-                                            Vector3D(frameX, opY2, opZ2),
-                                            Vector3D(frameX, opY1, opZ2),
-                                            windowColor,
-                                            isWindow = true
-                                        ))
-                                    }
-                                    
-                                    lastY = opY2
-                                }
-                                // Part after last opening
-                                addBox(x1, lastY, x2, (el.y + el.height).toDouble(), currentZ, effectiveWallTop, Color.DARK_GRAY)
-                            } else {
-                                // Wall is along X axis
-                                val y1 = el.y.toDouble()
-                                val y2 = (el.y + el.height).toDouble()
-                                var lastX = el.x.toDouble()
-                                val sortedOpenings = openings.sortedBy { it.x }
-                                for (op in sortedOpenings) {
-                                    val opX1 = op.x.toDouble()
-                                    val opX2 = (op.x + op.width).toDouble()
-                                    val opZ1 = currentZ + (if (op is PlanWindow) op.sillElevation.toDouble() else 0.0)
-                                    val opZ2 = opZ1 + (if (op is PlanWindow) op.height3D.toDouble() else (op as Door).verticalHeight.toDouble())
-
-                                    // Part before opening
-                                    addBox(lastX, y1, opX1, y2, currentZ, effectiveWallTop, Color.DARK_GRAY)
-                                    // Part above opening
-                                    addBox(opX1, y1, opX2, y2, opZ2, effectiveWallTop, Color.DARK_GRAY)
-                                    // Part below opening
-                                    addBox(opX1, y1, opX2, y2, currentZ, opZ1, Color.DARK_GRAY)
-
-                                    // Generate window frame for windows
-                                    if (op is PlanWindow) {
-                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
-                                        val windowPos = op.windowPosition
-                                        
-                                        // Determine which edge to place the window frame based on WindowPosition
-                                        val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
-                                        
-                                        // Create window frame as a thin rectangle (cylinder over the edge line)
-                                        model3d.rects.add(Rect3D(
-                                            Vector3D(opX1, frameY, opZ1),
-                                            Vector3D(opX2, frameY, opZ1),
-                                            Vector3D(opX2, frameY, opZ2),
-                                            Vector3D(opX1, frameY, opZ2),
-                                            windowColor,
-                                            isWindow = true
-                                        ))
-                                    }
-
-                                    lastX = opX2
-                                }
-                                // Part after last opening
-                                addBox(lastX, y1, (el.x + el.width).toDouble(), y2, currentZ, effectiveWallTop, Color.DARK_GRAY)
-                            }
-                        }
-                    }
-                    is PlanWindow -> {
-                        // Free-standing window - generate window frame
-                        val isVertical = el.width < el.height
-                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
-                        val windowPos = el.windowPosition
-                        
-                        val x1 = el.x.toDouble()
-                        val y1 = el.y.toDouble()
-                        val x2 = (el.x + el.width).toDouble()
-                        val y2 = (el.y + el.height).toDouble()
-                        val opZ1 = currentZ + el.sillElevation.toDouble()
-                        val opZ2 = opZ1 + el.height3D.toDouble()
-                        
-                        if (isVertical) {
-                            // Vertical window - frame on left or right edge
-                            val frameX = if (windowPos == WindowPosition.X2Y2) x2 else x1
-                            model3d.rects.add(Rect3D(
-                                Vector3D(frameX, y1, opZ1),
-                                Vector3D(frameX, y2, opZ1),
-                                Vector3D(frameX, y2, opZ2),
-                                Vector3D(frameX, y1, opZ2),
-                                windowColor,
-                                isWindow = true
-                            ))
-                        } else {
-                            // Horizontal window - frame on top or bottom edge
-                            val frameY = if (windowPos == WindowPosition.X2Y2) y2 else y1
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, frameY, opZ1),
-                                Vector3D(x2, frameY, opZ1),
-                                Vector3D(x2, frameY, opZ2),
-                                Vector3D(x1, frameY, opZ2),
-                                windowColor,
-                                isWindow = true
-                            ))
-                        }
-                    }
-                    is Door -> {
-                        // Doors are openings - store door info for collision detection in walk mode
-                        val x1 = el.x.toDouble()
-                        val y1 = el.y.toDouble()
-                        val x2 = (el.x + el.width).toDouble()
-                        val y2 = (el.y + el.height).toDouble()
-                        val doorZ1 = currentZ  // Door starts at floor level
-                        val doorZ2 = currentZ + el.verticalHeight.toDouble()  // Door top
-                        
-                        model3d.doorInfos.add(model.DoorInfo(x1, y1, x2, y2, doorZ1, doorZ2))
-                    }
-                    is Stairs -> {
-                        // Create a realistic staircase
-                        val x1 = el.x.toDouble()
-                        val y1 = el.y.toDouble()
-                        val x2 = (el.x + el.width).toDouble()
-                        val y2 = (el.y + el.height).toDouble()
-                        
-                        // Realistic step dimensions: ~17cm height, ~25cm depth
-                        val stepHeight = 17.0
-                        val stepDepth = 25.0
-                        
-                        // Use the totalRaise property directly
-                        val totalRaise = el.totalRaise.toDouble()
-                        
-                        // Calculate number of steps based on total raise
-                        val numSteps = if (totalRaise == 0.0) 1 else kotlin.math.max(1, kotlin.math.abs(totalRaise / stepHeight).toInt())
-                        val actualStepHeight = if (totalRaise == 0.0) 0.0 else totalRaise / numSteps
-                        
-                        // Determine stair direction based on orientation property
-                        val isAlongX = el.directionAlongX
-                        val stairLength = if (isAlongX) (x2 - x1) else (y2 - y1)
-                        val stairWidth = if (isAlongX) (y2 - y1) else (x2 - x1)
-                        val actualStepDepth = stairLength / numSteps
-                        
-                        // Starting Z position (base of stairs) - use the stairs' zOffset property directly
-                        // zOffset is for the top-left (X, Y) point
-                        // The Z for (X2, Y2) point is computed by adding zOffset and totalRaise
-                        val baseZ = currentZ + el.zOffset.toDouble()
-                        
-                        // Store stair info for walk mode height calculation
-                        model3d.stairInfos.add(model.StairInfo(x1, y1, x2, y2, baseZ, totalRaise, isAlongX))
-                        
-                        // Stair color
-                        val stairColor = Color(139, 119, 101) // Brown/wood color
-                        val slabColor = Color(160, 140, 120) // Slightly lighter for the slab
-                        
-                        // Slab thickness for the inclined ladder slab below stairs
-                        val slabThickness = 15.0
-                        
-                        // Generate each step (treads and risers)
-                        for (step in 0 until numSteps) {
-                            val stepZ = baseZ + step * actualStepHeight
-                            val nextStepZ = baseZ + (step + 1) * actualStepHeight
-                            
-                            if (isAlongX) {
-                                // Stairs along X axis
-                                val stepX1 = if (totalRaise >= 0) x1 + step * actualStepDepth else x2 - (step + 1) * actualStepDepth
-                                val stepX2 = if (totalRaise >= 0) x1 + (step + 1) * actualStepDepth else x2 - step * actualStepDepth
-                                
-                                // Top face of step (tread)
-                                model3d.rects.add(Rect3D(
-                                    Vector3D(stepX1, y1, nextStepZ), Vector3D(stepX2, y1, nextStepZ),
-                                    Vector3D(stepX2, y2, nextStepZ), Vector3D(stepX1, y2, nextStepZ),
-                                    stairColor
-                                ))
-                                
-                                // Front face of step (riser)
-                                if (totalRaise >= 0) {
-                                    model3d.rects.add(Rect3D(
-                                        Vector3D(stepX1, y1, stepZ), Vector3D(stepX1, y2, stepZ),
-                                        Vector3D(stepX1, y2, nextStepZ), Vector3D(stepX1, y1, nextStepZ),
-                                        stairColor
-                                    ))
-                                } else {
-                                    model3d.rects.add(Rect3D(
-                                        Vector3D(stepX2, y1, stepZ), Vector3D(stepX2, y2, stepZ),
-                                        Vector3D(stepX2, y2, nextStepZ), Vector3D(stepX2, y1, nextStepZ),
-                                        stairColor
-                                    ))
-                                }
-                                
-                                // Side triangles for this step (at y1 and y2)
-                                // Triangle at y1 side (front side when looking from y1)
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(stepX1, y1, stepZ),
-                                    Vector3D(stepX2, y1, stepZ),
-                                    Vector3D(stepX2, y1, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(stepX1, y1, stepZ),
-                                    Vector3D(stepX2, y1, nextStepZ),
-                                    Vector3D(stepX1, y1, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                
-                                // Triangle at y2 side (back side)
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(stepX1, y2, stepZ),
-                                    Vector3D(stepX2, y2, nextStepZ),
-                                    Vector3D(stepX2, y2, stepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(stepX1, y2, stepZ),
-                                    Vector3D(stepX1, y2, nextStepZ),
-                                    Vector3D(stepX2, y2, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                            } else {
-                                // Stairs along Y axis
-                                val stepY1 = if (totalRaise >= 0) y1 + step * actualStepDepth else y2 - (step + 1) * actualStepDepth
-                                val stepY2 = if (totalRaise >= 0) y1 + (step + 1) * actualStepDepth else y2 - step * actualStepDepth
-                                
-                                // Top face of step (tread)
-                                model3d.rects.add(Rect3D(
-                                    Vector3D(x1, stepY1, nextStepZ), Vector3D(x2, stepY1, nextStepZ),
-                                    Vector3D(x2, stepY2, nextStepZ), Vector3D(x1, stepY2, nextStepZ),
-                                    stairColor
-                                ))
-                                
-                                // Front face of step (riser)
-                                if (totalRaise >= 0) {
-                                    model3d.rects.add(Rect3D(
-                                        Vector3D(x1, stepY1, stepZ), Vector3D(x2, stepY1, stepZ),
-                                        Vector3D(x2, stepY1, nextStepZ), Vector3D(x1, stepY1, nextStepZ),
-                                        stairColor
-                                    ))
-                                } else {
-                                    model3d.rects.add(Rect3D(
-                                        Vector3D(x1, stepY2, stepZ), Vector3D(x2, stepY2, stepZ),
-                                        Vector3D(x2, stepY2, nextStepZ), Vector3D(x1, stepY2, nextStepZ),
-                                        stairColor
-                                    ))
-                                }
-                                
-                                // Side triangles for this step (at x1 and x2)
-                                // Triangle at x1 side
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(x1, stepY1, stepZ),
-                                    Vector3D(x1, stepY2, nextStepZ),
-                                    Vector3D(x1, stepY2, stepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(x1, stepY1, stepZ),
-                                    Vector3D(x1, stepY1, nextStepZ),
-                                    Vector3D(x1, stepY2, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                
-                                // Triangle at x2 side
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(x2, stepY1, stepZ),
-                                    Vector3D(x2, stepY2, stepZ),
-                                    Vector3D(x2, stepY2, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                                model3d.triangles.add(Triangle3D(
-                                    Vector3D(x2, stepY1, stepZ),
-                                    Vector3D(x2, stepY2, nextStepZ),
-                                    Vector3D(x2, stepY1, nextStepZ),
-                                    stairColor,
-                                    isStairsVisualOnly = true
-                                ))
-                            }
-                        }
-                        
-                        // Add inclined 15cm thick slab below the stairs (the stringer/ladder slab)
-                        // This is a parallelogram-shaped slab that follows the stair incline
-                        val endZ = baseZ + totalRaise
-                        val slabTopStartZ = baseZ  // Top surface at start
-                        val slabTopEndZ = endZ     // Top surface at end
-                        val slabBottomStartZ = baseZ - slabThickness  // Bottom surface at start
-                        val slabBottomEndZ = endZ - slabThickness     // Bottom surface at end
-                        
-                        if (isAlongX) {
-                            // Stairs along X axis - slab runs from x1 to x2
-                            val slabStartX = if (totalRaise >= 0) x1 else x2
-                            val slabEndX = if (totalRaise >= 0) x2 else x1
-                            
-                            // Top inclined surface
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabStartX, y1, slabTopStartZ), Vector3D(slabEndX, y1, slabTopEndZ),
-                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabStartX, y2, slabTopStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Bottom inclined surface
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y2, slabBottomStartZ),
-                                Vector3D(slabEndX, y2, slabBottomEndZ), Vector3D(slabEndX, y1, slabBottomEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Side surface at y1
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabEndX, y1, slabBottomEndZ),
-                                Vector3D(slabEndX, y1, slabTopEndZ), Vector3D(slabStartX, y1, slabTopStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Side surface at y2
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabStartX, y2, slabBottomStartZ), Vector3D(slabStartX, y2, slabTopStartZ),
-                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y2, slabBottomEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // End cap at start (vertical rectangle)
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabStartX, y1, slabBottomStartZ), Vector3D(slabStartX, y1, slabTopStartZ),
-                                Vector3D(slabStartX, y2, slabTopStartZ), Vector3D(slabStartX, y2, slabBottomStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // End cap at end (vertical rectangle)
-                            model3d.rects.add(Rect3D(
-                                Vector3D(slabEndX, y1, slabBottomEndZ), Vector3D(slabEndX, y2, slabBottomEndZ),
-                                Vector3D(slabEndX, y2, slabTopEndZ), Vector3D(slabEndX, y1, slabTopEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                        } else {
-                            // Stairs along Y axis - slab runs from y1 to y2
-                            val slabStartY = if (totalRaise >= 0) y1 else y2
-                            val slabEndY = if (totalRaise >= 0) y2 else y1
-                            
-                            // Top inclined surface
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, slabStartY, slabTopStartZ), Vector3D(x2, slabStartY, slabTopStartZ),
-                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabTopEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Bottom inclined surface
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabEndY, slabBottomEndZ),
-                                Vector3D(x2, slabEndY, slabBottomEndZ), Vector3D(x2, slabStartY, slabBottomStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Side surface at x1
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x1, slabStartY, slabTopStartZ),
-                                Vector3D(x1, slabEndY, slabTopEndZ), Vector3D(x1, slabEndY, slabBottomEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // Side surface at x2
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x2, slabStartY, slabBottomStartZ), Vector3D(x2, slabEndY, slabBottomEndZ),
-                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabStartY, slabTopStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // End cap at start (vertical rectangle)
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, slabStartY, slabBottomStartZ), Vector3D(x2, slabStartY, slabBottomStartZ),
-                                Vector3D(x2, slabStartY, slabTopStartZ), Vector3D(x1, slabStartY, slabTopStartZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                            
-                            // End cap at end (vertical rectangle)
-                            model3d.rects.add(Rect3D(
-                                Vector3D(x1, slabEndY, slabBottomEndZ), Vector3D(x1, slabEndY, slabTopEndZ),
-                                Vector3D(x2, slabEndY, slabTopEndZ), Vector3D(x2, slabEndY, slabBottomEndZ),
-                                slabColor,
-                                isStairsVisualOnly = true
-                            ))
-                        }
-                    }
-                }
-            }
-            currentZ += floorHeight
-        }
-
-        var utilZ = 0.0
-        for (floor in floors) {
-            addUtilityCylinders(model3d, floor.doc.elements, floor.doc.kinds, utilZ, floor.height.toDouble())
-            utilZ += floor.height.toDouble()
-        }
-
-        doc3d.model = model3d
-        doc3d.isModified = true
-        threeDDocuments.add(doc3d)
-        val window = ThreeDWindow(this, doc3d)
-        window.jMenuBar = createMenuBar()
     }
 
     private fun areAdjacentRooms(r1: Room, r2: Room): Boolean {
@@ -1495,56 +814,57 @@ class FloorPlanApp {
     fun getThreeDDocuments(): List<ThreeDDocument> = threeDDocuments.toList()
     
     fun regenerate3DModelFromFloors(doc3d: ThreeDDocument) {
-        // Parse floor files and regenerate the 3D model
-        val floors = mutableListOf<FloorInfo>()
-        val docFactory = DocumentBuilderFactory.newInstance()
-        val docBuilder = docFactory.newDocumentBuilder()
-        
-        for (floorData in doc3d.floors) {
-            val floorFile = File(floorData.filePath)
-            if (floorFile.exists()) {
-                try {
-                    val floorXmlDoc = docBuilder.parse(floorFile)
-                    floorXmlDoc.documentElement.normalize()
-                    val floorElements = parseFloorElements(floorXmlDoc)
-                    val floorDoc = FloorPlanDocument(this)
-                    floorDoc.elements.addAll(floorElements)
-                    floorDoc.currentFile = floorFile
-                    val floorKindNodes = floorXmlDoc.getElementsByTagName("Kind")
-                    if (floorKindNodes.length > 0) {
-                        floorDoc.kinds.clear()
-                        for (ki in 0 until floorKindNodes.length) {
-                            val ke = floorKindNodes.item(ki) as Element
-                            val kName = ke.getAttribute("name")
-                            val kColor = Color(ke.getAttribute("color").toInt())
-                            val kDiameter = if (ke.hasAttribute("diameter")) ke.getAttribute("diameter").toDouble() else 1.0
-                            floorDoc.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
-                        }
-                    }
-                    floors.add(FloorInfo(floorDoc, floorData.height))
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
+        doc3d.model = buildModel3D(doc3d)
+        doc3d.panel.updateModel()
+    }
+
+    internal fun openEmbeddedFloorEditor(doc3d: ThreeDDocument, floorIndex: Int) {
+        val floorData = doc3d.floors.getOrNull(floorIndex) ?: return
+        val floorDoc = floorData.floorDoc
+
+        // Bring to front if already open
+        val existingWindow = floorDoc.window
+        if (existingWindow != null && existingWindow.isDisplayable) {
+            existingWindow.toFront()
+            activeDocument = floorDoc
+            activeWindow = existingWindow
+            sidePanel.updateFieldsForActiveDocument()
+            updateUndoRedoStates()
+            return
         }
-        
-        if (floors.isNotEmpty()) {
-            // Regenerate the model in place using the internal generation function
-            val newModel = buildModel3D(floors, doc3d)
-            doc3d.model = newModel
-            doc3d.panel.updateModel()
+
+        floorDoc.ambientHouseDoc = doc3d
+        floorDoc.displayName = "${floorData.name} [${doc3d.currentFile?.name ?: "New House"}]"
+
+        if (!documents.contains(floorDoc)) {
+            documents.add(floorDoc)
         }
+
+        if (floorDoc.undoStack.isEmpty()) {
+            floorDoc.saveState()
+            floorDoc.isModified = false
+            doc3d.isModified = doc3d.floors.any { it.floorDoc.isModified }
+        }
+
+        val window = EditorWindow(this, floorDoc)
+        window.jMenuBar = createMenuBar()
+
+        activeDocument = floorDoc
+        activeWindow = window
+        updateUndoRedoStates()
+        sidePanel.updateFieldsForActiveDocument()
     }
     
-    // Internal function to build Model3D from floor info - extracted from generate3DModel
-    private fun buildModel3D(floors: List<FloorInfo>, doc3d: ThreeDDocument): model.Model3D {
+    // Internal function to build Model3D from the embedded floors in doc3d
+    private fun buildModel3D(doc3d: ThreeDDocument): model.Model3D {
         val model3d = model.Model3D()
-        
+        val floors = doc3d.floors
+
         var currentZ = 0.0
-        for ((floorIndex, floor) in floors.withIndex()) {
-            val floorHeight = floor.height.toDouble()
-            val roomsOnFloor = floor.doc.elements.filterIsInstance<Room>()
-            
+        for ((floorIndex, floorEntry) in floors.withIndex()) {
+            val floorHeight = floorEntry.height.toDouble()
+            val roomsOnFloor = floorEntry.floorDoc.elements.filterIsInstance<Room>()
+
             // Compute light positions based on dockedness components
             val roomsWithoutOffset = roomsOnFloor.filter { it.zOffset == 0 }
             if (roomsWithoutOffset.isNotEmpty()) {
@@ -1560,7 +880,7 @@ class FloorPlanApp {
                         }
                     }
                 }
-                
+
                 val visited = mutableSetOf<Room>()
                 for (room in roomsWithoutOffset) {
                     if (room !in visited) {
@@ -1578,7 +898,7 @@ class FloorPlanApp {
                                 }
                             }
                         }
-                        
+
                         val largestRoom = component.maxByOrNull { it.width.toDouble() * it.height.toDouble() }
                         if (largestRoom != null) {
                             val centerX = largestRoom.x.toDouble() + largestRoom.width.toDouble() / 2.0
@@ -1589,9 +909,8 @@ class FloorPlanApp {
                 }
             }
 
-            // Check if this floor should be drawn (get draw flag from doc3d.floors)
-            val floorData = doc3d.floors.getOrNull(floorIndex)
-            val shouldDraw = floorData?.draw ?: true
+            // Check if this floor should be drawn
+            val shouldDraw = floorEntry.draw
             if (!shouldDraw) {
                 currentZ += floorHeight
                 continue
@@ -1599,7 +918,7 @@ class FloorPlanApp {
             val wallColor = Color.DARK_GRAY
             val floorAlpha = 255
 
-            for (el in floor.doc.elements) {
+            for (el in floorEntry.floorDoc.elements) {
                 when (el) {
                     is Room -> {
                         val x1 = el.x.toDouble()
@@ -1718,14 +1037,13 @@ class FloorPlanApp {
                     }
                     is Wall -> {
                         val wallBounds = el.getBounds()
-                        val openings = floor.doc.elements.filter { it is PlanWindow || it is Door }
+                        val openings = floorEntry.floorDoc.elements.filter { it is PlanWindow || it is Door }
                             .filter { wallBounds.contains(it.getBounds()) }
-                        
-                        val currentFloorIndex = floors.indexOf(floor)
+
                         var wallTopReduction = 0.0
-                        if (currentFloorIndex < floors.size - 1) {
-                            val floorAbove = floors[currentFloorIndex + 1]
-                            val roomsAbove = floorAbove.doc.elements.filterIsInstance<Room>()
+                        if (floorIndex < floors.size - 1) {
+                            val floorAbove = floors[floorIndex + 1]
+                            val roomsAbove = floorAbove.floorDoc.elements.filterIsInstance<Room>()
                             for (roomAbove in roomsAbove) {
                                 val roomBounds = roomAbove.getBounds()
                                 if (roomBounds.contains(wallBounds)) {
@@ -1735,7 +1053,7 @@ class FloorPlanApp {
                             }
                         }
                         val effectiveWallTop = currentZ + floorHeight - wallTopReduction
-                        
+
                         fun addBox(x1: Double, y1: Double, x2: Double, y2: Double, z1: Double, z2: Double, color: Color) {
                             if (x1 >= x2 || y1 >= y2 || z1 >= z2) return
                             model3d.rects.add(Rect3D(Vector3D(x1, y1, z1), Vector3D(x2, y1, z1), Vector3D(x2, y2, z1), Vector3D(x1, y2, z1), color))
@@ -1994,9 +1312,9 @@ class FloorPlanApp {
         }
 
         var utilZ = 0.0
-        for (floor in floors) {
-            addUtilityCylinders(model3d, floor.doc.elements, floor.doc.kinds, utilZ, floor.height.toDouble())
-            utilZ += floor.height.toDouble()
+        for (floorEntry in floors) {
+            addUtilityCylinders(model3d, floorEntry.floorDoc.elements, doc3d.kinds, utilZ, floorEntry.height.toDouble())
+            utilZ += floorEntry.height.toDouble()
         }
 
         return model3d
@@ -2116,6 +1434,8 @@ class FloorPlanApp {
 
     private fun showManageKindsDialog() {
         val doc = activeDocument ?: return
+        val effectiveKinds = doc.effectiveKinds
+        val houseDoc = doc.ambientHouseDoc
         val dialog = JDialog(activeWindow, "Manage Wall Layout Kinds", true)
         dialog.layout = BorderLayout()
         dialog.setSize(500, 350)
@@ -2124,7 +1444,7 @@ class FloorPlanApp {
         val model = object : DefaultTableModel(arrayOf("Name", "Color", "Diameter (cm)"), 0) {
             override fun getColumnClass(columnIndex: Int): Class<*> = if (columnIndex == 1) Color::class.java else String::class.java
         }
-        for (kind in doc.kinds) {
+        for (kind in effectiveKinds) {
             model.addRow(arrayOf(kind.name, kind.color, kind.diameter.toString()))
         }
         val table = JTable(model)
@@ -2151,7 +1471,7 @@ class FloorPlanApp {
                 currentColor = value as? Color
                 val panel = JPanel()
                 panel.background = currentColor
-                
+
                 SwingUtilities.invokeLater {
                     val color = JColorChooser.showDialog(dialog, "Choose Kind Color", currentColor ?: Color.RED)
                     if (color != null) {
@@ -2190,15 +1510,21 @@ class FloorPlanApp {
         val okBtn = JButton("OK")
         okBtn.addActionListener {
             if (table.isEditing) table.cellEditor.stopCellEditing()
-            doc.kinds.clear()
+            effectiveKinds.clear()
             for (i in 0 until model.rowCount) {
                 val name = model.getValueAt(i, 0) as String
                 val color = model.getValueAt(i, 1) as Color
                 val diameter = model.getValueAt(i, 2).toString().toDoubleOrNull()?.coerceAtLeast(0.1) ?: 1.0
-                doc.kinds.add(WallLayoutKind(name, color, diameter))
+                effectiveKinds.add(WallLayoutKind(name, color, diameter))
             }
-            doc.isModified = true
+            if (houseDoc != null) {
+                houseDoc.isModified = true
+                houseDoc.window?.title = "3D House Model - ${houseDoc.currentFile?.name ?: "Untitled"}*"
+            } else {
+                doc.isModified = true
+            }
             repaintAllCanvases()
+            sidePanel.updateFieldsForActiveDocument()
             dialog.dispose()
         }
         val cancelBtn = JButton("Cancel")
@@ -2212,11 +1538,17 @@ class FloorPlanApp {
         dialog.isVisible = true
     }
 
-    /** Sum of all asset assignments with [assetName] on utility points of [kindIndex]
-     *  across all currently open floor plan documents. */
-    internal fun computeSpentAssets(kindIndex: Int, assetName: String): Int {
+    /** Sum of all asset assignments with [assetName] on utility points of [kindIndex].
+     *  If [contextDoc] is provided and is embedded in a house, scans all floors of that house.
+     *  Otherwise scans all open documents. */
+    internal fun computeSpentAssets(kindIndex: Int, assetName: String, contextDoc: FloorPlanDocument? = null): Int {
         var total = 0
-        for (doc in documents) {
+        val docsToScan: List<FloorPlanDocument> = when {
+            contextDoc?.ambientHouseDoc != null -> contextDoc.ambientHouseDoc!!.floors.map { it.floorDoc }
+            contextDoc != null -> listOf(contextDoc)
+            else -> documents.toList()
+        }
+        for (doc in docsToScan) {
             for (wall in doc.elements.filterIsInstance<Wall>()) {
                 for (p in wall.frontLayout.points + wall.backLayout.points) {
                     if (p.kind == kindIndex) {
@@ -2228,24 +1560,65 @@ class FloorPlanApp {
         return total
     }
 
-    /** Open (or bring to front) the non-modal Asset Manager window. */
+    /** Open the modal Asset Manager dialog. */
     private fun showAssetManagerDialog() {
-        val existing = assetManagerFrame
-        if (existing != null && existing.isDisplayable) {
-            existing.toFront()
+        // ── Resolve data source once at open time ────────────────────────
+        // Priority: active 3D window > embedded floor's house doc > standalone floor doc.
+        val doc3d: ThreeDDocument? = when {
+            activeWindow is ThreeDWindow -> (activeWindow as ThreeDWindow).doc
+            activeDocument?.ambientHouseDoc != null -> activeDocument!!.ambientHouseDoc
+            else -> null
+        }
+        val standaloneDoc: FloorPlanDocument? = if (doc3d == null) activeDocument else null
+
+        if (doc3d == null && standaloneDoc == null) {
+            JOptionPane.showMessageDialog(activeWindow, "No document is open.", "Asset Manager", JOptionPane.INFORMATION_MESSAGE)
             return
         }
 
-        val frame = JFrame("Asset Manager")
-        assetManagerFrame = frame
-        frame.defaultCloseOperation = JFrame.DISPOSE_ON_CLOSE
-        frame.setSize(720, 480)
-        frame.isResizable = true
-        frame.layout = BorderLayout()
+        val sourceKinds: MutableList<WallLayoutKind> = doc3d?.kinds ?: standaloneDoc!!.kinds
+        val sourceAssetDefs: MutableMap<Int, MutableList<AssetDefinition>> =
+            doc3d?.assetDefinitions ?: standaloneDoc!!.assetDefinitions
+        val sourceName: String = when {
+            doc3d != null -> doc3d.currentFile?.name ?: "New House"
+            else -> standaloneDoc!!.currentFile?.name ?: "Untitled"
+        }
+        // Docs to scan when computing "Spent" totals.
+        val floorDocsToScan: List<FloorPlanDocument> =
+            doc3d?.floors?.map { it.floorDoc } ?: documents
+
+        fun computeSpent(kindIdx: Int, assetName: String): Int {
+            var total = 0
+            for (fpDoc in floorDocsToScan) {
+                for (wall in fpDoc.elements.filterIsInstance<Wall>()) {
+                    for (p in wall.frontLayout.points + wall.backLayout.points) {
+                        if (p.kind == kindIdx)
+                            total += p.assets.filter { it.assetName == assetName }.sumOf { it.quantity }
+                    }
+                }
+            }
+            return total
+        }
+
+        fun markModified() {
+            if (doc3d != null) {
+                doc3d.isModified = true
+            } else {
+                standaloneDoc!!.isModified = true
+                standaloneDoc.window?.updateTitle()
+            }
+        }
+
+        // ── Dialog setup ─────────────────────────────────────────────────
+        val dialog = JDialog(activeWindow, "Asset Manager", true)
+        dialog.defaultCloseOperation = JDialog.DISPOSE_ON_CLOSE
+        dialog.setSize(720, 520)
+        dialog.isResizable = true
+        dialog.layout = BorderLayout()
 
         // ── kind selector ────────────────────────────────────────────────
         val kindComboBox = JComboBox<String>()
-        val docLabel = JLabel("(no document)")
+        val docLabel = JLabel(sourceName)
 
         val tableModel = object : DefaultTableModel(
             arrayOf("Asset name", "Asset limit", "Asset physical width (cm)",
@@ -2274,33 +1647,27 @@ class FloorPlanApp {
             }
         }
 
-        // ── helpers to refresh UI from the active document ───────────────
+        // ── helpers ──────────────────────────────────────────────────────
         var suppressTableListener = false
 
         fun refreshKinds() {
-            val doc = activeDocument
-            if (doc == null) {
-                docLabel.text = "(no document open)"
-                kindComboBox.removeAllItems()
-                return
-            }
-            docLabel.text = doc.currentFile?.name ?: "Untitled"
+            suppressTableListener = true
             val sel = kindComboBox.selectedItem
             kindComboBox.removeAllItems()
-            doc.kinds.forEach { kindComboBox.addItem(it.name) }
+            sourceKinds.forEach { kindComboBox.addItem(it.name) }
             if (sel != null && kindComboBox.itemCount > 0) kindComboBox.selectedItem = sel
+            suppressTableListener = false
         }
 
         fun refreshTable() {
-            val doc = activeDocument ?: run { tableModel.setRowCount(0); return }
             val kindIdx = kindComboBox.selectedIndex
             if (kindIdx < 0) { tableModel.setRowCount(0); return }
             suppressTableListener = true
             tableModel.setRowCount(0)
-            val defs = doc.assetDefinitions.getOrDefault(kindIdx, mutableListOf())
+            val defs = sourceAssetDefs.getOrDefault(kindIdx, mutableListOf())
             for (def in defs) {
-                val spent = computeSpentAssets(kindIdx, def.name)
-                tableModel.addRow(arrayOf(def.name, def.limit, def.physicalWidth, def.physicalHeight, spent))
+                tableModel.addRow(arrayOf(def.name, def.limit, def.physicalWidth, def.physicalHeight,
+                    computeSpent(kindIdx, def.name)))
             }
             suppressTableListener = false
         }
@@ -2316,7 +1683,6 @@ class FloorPlanApp {
             // TableModelListener which fires synchronously inside editingStopped→setValueAt,
             // before removeEditor() runs. Calling stopCellEditing() here would recurse
             // back into editingStopped() and cause a StackOverflowError on the EDT.
-            val doc = activeDocument ?: return
             val kindIdx = kindComboBox.selectedIndex
             if (kindIdx < 0) return
             val defs = mutableListOf<AssetDefinition>()
@@ -2327,30 +1693,34 @@ class FloorPlanApp {
                 val h = tableModel.getValueAt(i, 3)?.toString()?.toDoubleOrNull() ?: 0.0
                 defs.add(AssetDefinition(name, limit, w, h))
             }
-            doc.assetDefinitions[kindIdx] = defs
-            doc.isModified = true
+            sourceAssetDefs[kindIdx] = defs
+            markModified()
         }
 
         // Apply current edits + refresh spent column
         fun refreshSpent() {
             commitEdit()
             applyTableToDoc()
-            val doc = activeDocument ?: return
             val kindIdx = kindComboBox.selectedIndex
             if (kindIdx < 0) return
             suppressTableListener = true
             for (i in 0 until tableModel.rowCount) {
                 val name = tableModel.getValueAt(i, 0)?.toString() ?: continue
-                tableModel.setValueAt(computeSpentAssets(kindIdx, name), i, 4)
+                tableModel.setValueAt(computeSpent(kindIdx, name), i, 4)
             }
             suppressTableListener = false
         }
 
         // ── kind combo listener ──────────────────────────────────────────
+        // Guard with suppressTableListener so that programmatic combo changes
+        // (e.g. inside refreshKinds) never call applyTableToDoc() on an empty table
+        // and wipe the model before refreshTable() has a chance to populate it.
         kindComboBox.addActionListener {
-            commitEdit()
-            applyTableToDoc()
-            refreshTable()
+            if (!suppressTableListener) {
+                commitEdit()
+                applyTableToDoc()
+                refreshTable()
+            }
         }
 
         // ── table model listener: persist edits live ─────────────────────
@@ -2386,7 +1756,7 @@ class FloorPlanApp {
         topPanel.add(refreshBtn)
         topPanel.add(refreshSpentBtn)
 
-        val btnPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
+        val addRemovePanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT))
         val addBtn = JButton("Add Asset")
         addBtn.addActionListener {
             commitEdit()
@@ -2399,21 +1769,30 @@ class FloorPlanApp {
             val row = table.selectedRow
             if (row >= 0) { tableModel.removeRow(row); applyTableToDoc() }
         }
-        btnPanel.add(addBtn)
-        btnPanel.add(removeBtn)
+        addRemovePanel.add(addBtn)
+        addRemovePanel.add(removeBtn)
 
-        frame.add(topPanel, BorderLayout.NORTH)
-        frame.add(JScrollPane(table), BorderLayout.CENTER)
-        frame.add(btnPanel, BorderLayout.SOUTH)
+        val okBtn = JButton("OK")
+        okBtn.addActionListener { commitEdit(); applyTableToDoc(); dialog.dispose() }
 
-        frame.addWindowListener(object : java.awt.event.WindowAdapter() {
+        val bottomPanel = JPanel(BorderLayout())
+        bottomPanel.add(addRemovePanel, BorderLayout.WEST)
+        val okPanel = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT))
+        okPanel.add(okBtn)
+        bottomPanel.add(okPanel, BorderLayout.EAST)
+
+        dialog.add(topPanel, BorderLayout.NORTH)
+        dialog.add(JScrollPane(table), BorderLayout.CENTER)
+        dialog.add(bottomPanel, BorderLayout.SOUTH)
+
+        dialog.addWindowListener(object : java.awt.event.WindowAdapter() {
             override fun windowClosing(e: java.awt.event.WindowEvent) { commitEdit(); applyTableToDoc() }
         })
 
         refreshKinds()
         refreshTable()
-        frame.setLocationRelativeTo(activeWindow)
-        frame.isVisible = true
+        dialog.setLocationRelativeTo(activeWindow)
+        dialog.isVisible = true
     }
 
     /** Modal "Modify Assets" dialog for a single WallLayoutPoint. */
@@ -2423,13 +1802,13 @@ class FloorPlanApp {
         floorPlanDoc: FloorPlanDocument,
         parentWindow: JFrame?
     ) {
-        val kindName = floorPlanDoc.kinds.getOrNull(kindIndex)?.name ?: "Kind $kindIndex"
+        val kindName = floorPlanDoc.effectiveKinds.getOrNull(kindIndex)?.name ?: "Kind $kindIndex"
         val dialog = JDialog(parentWindow, "Modify Assets – $kindName", true)
         dialog.layout = BorderLayout()
         dialog.setSize(420, 340)
         dialog.setLocationRelativeTo(parentWindow)
 
-        val defs = floorPlanDoc.assetDefinitions.getOrDefault(kindIndex, mutableListOf())
+        val defs = floorPlanDoc.effectiveAssetDefinitions.getOrDefault(kindIndex, mutableListOf())
 
         val tableModel = object : DefaultTableModel(arrayOf("Asset name", "Quantity"), 0) {
             override fun isCellEditable(row: Int, column: Int) = true
@@ -2468,6 +1847,10 @@ class FloorPlanApp {
             }
             floorPlanDoc.isModified = true
             (floorPlanDoc.window as? EditorWindow)?.updateTitle()
+            floorPlanDoc.ambientHouseDoc?.let { houseDoc ->
+                houseDoc.isModified = true
+                houseDoc.window?.title = "3D House Model - ${houseDoc.currentFile?.name ?: "Untitled"}*"
+            }
             repaintAllCanvases()
             dialog.dispose()
         }
@@ -2522,6 +1905,71 @@ class FloorPlanApp {
         }
     }
 
+    private fun saveFloorElementsToNode(floorDoc: FloorPlanDocument, xmlDoc: org.w3c.dom.Document, parentNode: org.w3c.dom.Element) {
+        for (el in floorDoc.elements) {
+            val elNode = xmlDoc.createElement("Element")
+            elNode.setAttribute("type", el.type.name)
+            if (el is PolygonRoom) {
+                val verticesStr = el.vertices.joinToString(";") { "${it.x},${it.y}" }
+                elNode.setAttribute("vertices", verticesStr)
+                elNode.setAttribute("floorThickness", el.floorThickness.toString())
+                elNode.setAttribute("zOffset", el.zOffset.toString())
+            } else {
+                elNode.setAttribute("x", el.x.toString())
+                elNode.setAttribute("y", el.y.toString())
+                elNode.setAttribute("width", el.width.toString())
+                elNode.setAttribute("height", el.height.toString())
+                if (el is Wall) {
+                    fun addLayout(layout: WallLayout, tagName: String) {
+                        val layoutNode = xmlDoc.createElement(tagName)
+                        for (p in layout.points) {
+                            val pNode = xmlDoc.createElement("Point")
+                            pNode.setAttribute("x", p.x.toString())
+                            pNode.setAttribute("z", p.z.toString())
+                            pNode.setAttribute("kind", p.kind.toString())
+                            if (p.name.isNotEmpty()) pNode.setAttribute("name", p.name)
+                            for (a in p.assets) {
+                                val aNode = xmlDoc.createElement("Assignment")
+                                aNode.setAttribute("assetName", a.assetName)
+                                aNode.setAttribute("quantity", a.quantity.toString())
+                                pNode.appendChild(aNode)
+                            }
+                            layoutNode.appendChild(pNode)
+                        }
+                        elNode.appendChild(layoutNode)
+                    }
+                    addLayout(el.frontLayout, "FrontLayout")
+                    addLayout(el.backLayout, "BackLayout")
+                }
+                if (el is PlanWindow) {
+                    elNode.setAttribute("height3D", el.height3D.toString())
+                    elNode.setAttribute("aboveFloorHeight", el.sillElevation.toString())
+                    elNode.setAttribute("windowPosition", el.windowPosition.name)
+                }
+                if (el is Door) elNode.setAttribute("height3D", el.verticalHeight.toString())
+                if (el is Room) {
+                    elNode.setAttribute("floorThickness", el.floorThickness.toString())
+                    elNode.setAttribute("zOffset", el.zOffset.toString())
+                }
+                if (el is Stairs) {
+                    elNode.setAttribute("directionAlongX", el.directionAlongX.toString())
+                    elNode.setAttribute("totalRaise", el.totalRaise.toString())
+                    elNode.setAttribute("zOffset", el.zOffset.toString())
+                }
+                if (el is UtilitiesConnection) {
+                    elNode.setAttribute("startWallIndex", floorDoc.elements.indexOf(el.startWall).toString())
+                    elNode.setAttribute("startIsFront", el.startIsFront.toString())
+                    elNode.setAttribute("startPointIndex", (if (el.startIsFront) el.startWall.frontLayout else el.startWall.backLayout).points.indexOf(el.startPoint).toString())
+                    elNode.setAttribute("endWallIndex", floorDoc.elements.indexOf(el.endWall).toString())
+                    elNode.setAttribute("endIsFront", el.endIsFront.toString())
+                    elNode.setAttribute("endPointIndex", (if (el.endIsFront) el.endWall.frontLayout else el.endWall.backLayout).points.indexOf(el.endPoint).toString())
+                    elNode.setAttribute("kind", el.kind.toString())
+                }
+            }
+            parentNode.appendChild(elNode)
+        }
+    }
+
     private fun performSave3D(doc: ThreeDDocument, file: File) {
         try {
             val docFactory = DocumentBuilderFactory.newInstance()
@@ -2531,11 +1979,42 @@ class FloorPlanApp {
             val rootElement = xmlDoc.createElement("ThreeDModel")
             xmlDoc.appendChild(rootElement)
 
+            // Save house-level kinds
+            for (kind in doc.kinds) {
+                val kNode = xmlDoc.createElement("Kind")
+                kNode.setAttribute("name", kind.name)
+                kNode.setAttribute("color", kind.color.rgb.toString())
+                kNode.setAttribute("diameter", kind.diameter.toString())
+                rootElement.appendChild(kNode)
+            }
+
+            // Save house-level asset definitions
+            if (doc.assetDefinitions.isNotEmpty()) {
+                val assetDefsNode = xmlDoc.createElement("AssetDefinitions")
+                for ((kindIdx, defs) in doc.assetDefinitions) {
+                    if (defs.isEmpty()) continue
+                    val kindAssetsNode = xmlDoc.createElement("KindAssets")
+                    kindAssetsNode.setAttribute("kind", kindIdx.toString())
+                    for (def in defs) {
+                        val defNode = xmlDoc.createElement("AssetDef")
+                        defNode.setAttribute("name", def.name)
+                        defNode.setAttribute("limit", def.limit.toString())
+                        defNode.setAttribute("width", def.physicalWidth.toString())
+                        defNode.setAttribute("height", def.physicalHeight.toString())
+                        kindAssetsNode.appendChild(defNode)
+                    }
+                    assetDefsNode.appendChild(kindAssetsNode)
+                }
+                if (assetDefsNode.hasChildNodes()) rootElement.appendChild(assetDefsNode)
+            }
+
+            // Save each floor with embedded elements
             for (floor in doc.floors) {
                 val floorNode = xmlDoc.createElement("Floor")
-                floorNode.setAttribute("path", floor.filePath)
+                floorNode.setAttribute("name", floor.name)
                 floorNode.setAttribute("height", floor.height.toString())
                 floorNode.setAttribute("draw", floor.draw.toString())
+                saveFloorElementsToNode(floor.floorDoc, xmlDoc, floorNode)
                 rootElement.appendChild(floorNode)
             }
 
@@ -2549,6 +2028,11 @@ class FloorPlanApp {
             doc.currentFile = file
             doc.isModified = false
             doc.window?.title = "3D House Model - ${file.name}"
+            // Mark all embedded floor docs as clean
+            for (floor in doc.floors) {
+                floor.floorDoc.isModified = false
+                floor.floorDoc.window?.updateTitle()
+            }
             addToRecent(file)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -2559,31 +2043,39 @@ class FloorPlanApp {
 
     private fun save() {
         activeDocument?.let { doc ->
-            val file = doc.currentFile
-            if (file == null) {
-                saveAs()
-            } else {
-                performSave(file)
+            val houseDoc = doc.ambientHouseDoc
+            if (houseDoc != null) {
+                save3D(houseDoc)
+                doc.isModified = false
+                doc.window?.updateTitle()
+                return@let
             }
+            val file = doc.currentFile
+            if (file == null) saveAs() else performSave(file)
         }
-        threeDDocuments.find { it.window == activeWindow }?.let { doc ->
-            save3D(doc)
+        activeWindow?.let { win ->
+            if (win is ThreeDWindow) save3D(win.doc)
         }
     }
 
     private fun saveAs() {
         activeDocument?.let { doc ->
+            val houseDoc = doc.ambientHouseDoc
+            if (houseDoc != null) {
+                saveAs3D(houseDoc)
+                doc.isModified = false
+                doc.window?.updateTitle()
+                return@let
+            }
             val chooser = JFileChooser()
             if (chooser.showSaveDialog(activeWindow) == JFileChooser.APPROVE_OPTION) {
                 var file = chooser.selectedFile
-                if (!file.name.endsWith(".xml")) {
-                    file = File(file.absolutePath + ".xml")
-                }
+                if (!file.name.endsWith(".xml")) file = File(file.absolutePath + ".xml")
                 performSave(file)
             }
         }
-        threeDDocuments.find { it.window == activeWindow }?.let { doc ->
-            saveAs3D(doc)
+        activeWindow?.let { win ->
+            if (win is ThreeDWindow) saveAs3D(win.doc)
         }
     }
 
@@ -2645,7 +2137,7 @@ class FloorPlanApp {
                         }
                         assetDefsNode.appendChild(kindAssetsNode)
                     }
-                    rootElement.appendChild(assetDefsNode)
+                    if (assetDefsNode.hasChildNodes()) rootElement.appendChild(assetDefsNode)
                 }
 
                 for (el in doc.elements) {
@@ -2743,8 +2235,18 @@ class FloorPlanApp {
         }
     }
 
+    /** Parse plan elements from all `<Element>` children within a given DOM element (e.g. a `<Floor>` node). */
+    private fun parseFloorElements(scope: Element): List<PlanElement> {
+        val nList = scope.getElementsByTagName("Element")
+        return parseElementNodeList(nList)
+    }
+
     private fun parseFloorElements(xmlDoc: org.w3c.dom.Document): List<PlanElement> {
         val nList = xmlDoc.getElementsByTagName("Element")
+        return parseElementNodeList(nList)
+    }
+
+    private fun parseElementNodeList(nList: org.w3c.dom.NodeList): List<PlanElement> {
         val newElements = arrayOfNulls<PlanElement>(nList.length)
         data class DeferredConn(val index: Int, val swi: Int, val sif: Boolean, val spi: Int, val ewi: Int, val eif: Boolean, val epi: Int, val kind: Int)
         val deferred = mutableListOf<DeferredConn>()
@@ -2885,64 +2387,105 @@ class FloorPlanApp {
             xmlDoc.documentElement.normalize()
 
             if (xmlDoc.documentElement.nodeName == "ThreeDModel") {
-                val floors = mutableListOf<FloorInfo>()
-                val floorNodes = xmlDoc.getElementsByTagName("Floor")
-                val floorDataList = mutableListOf<ThreeDDocument.FloorData>()
-                for (i in 0 until floorNodes.length) {
-                    val floorNode = floorNodes.item(i) as Element
-                    val path = floorNode.getAttribute("path")
-                    val height = floorNode.getAttribute("height").toInt()
-                    val draw = if (floorNode.hasAttribute("draw")) floorNode.getAttribute("draw").toBoolean() else true
-                    floorDataList.add(ThreeDDocument.FloorData(path, height, draw))
-                    
-                    val floorFile = File(path)
-                    if (floorFile.exists()) {
-                        val floorXmlDoc = docBuilder.parse(floorFile)
-                        floorXmlDoc.documentElement.normalize()
-                        val floorElements = parseFloorElements(floorXmlDoc)
-                        val floorDoc = FloorPlanDocument(this)
-                        floorDoc.elements.addAll(floorElements)
-                        floorDoc.currentFile = floorFile
-                        val floorKindNodes = floorXmlDoc.getElementsByTagName("Kind")
-                        if (floorKindNodes.length > 0) {
-                            floorDoc.kinds.clear()
-                            for (ki in 0 until floorKindNodes.length) {
-                                val ke = floorKindNodes.item(ki) as Element
-                                val kName = ke.getAttribute("name")
-                                val kColor = Color(ke.getAttribute("color").toInt())
-                                val kDiameter = if (ke.hasAttribute("diameter")) ke.getAttribute("diameter").toDouble() else 1.0
-                                floorDoc.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
-                            }
+                val doc3d = ThreeDDocument(this)
+
+                // Load house-level kinds from root
+                val kindNodes = xmlDoc.getElementsByTagName("Kind")
+                if (kindNodes.length > 0) {
+                    doc3d.kinds.clear()
+                    for (ki in 0 until kindNodes.length) {
+                        val ke = kindNodes.item(ki) as Element
+                        // Only top-level Kind elements (direct children of root)
+                        if (ke.parentNode == xmlDoc.documentElement) {
+                            val kName = ke.getAttribute("name")
+                            val kColor = Color(ke.getAttribute("color").toInt())
+                            val kDiameter = if (ke.hasAttribute("diameter")) ke.getAttribute("diameter").toDouble() else 1.0
+                            doc3d.kinds.add(WallLayoutKind(kName, kColor, kDiameter))
                         }
-                        loadAssetDefinitions(floorXmlDoc, floorDoc)
-                        floors.add(FloorInfo(floorDoc, height))
-                    } else {
-                        JOptionPane.showMessageDialog(null, "Floor plan file not found: $path")
                     }
                 }
 
-                if (floors.isNotEmpty()) {
-                    generate3DModel(floors)
-                    val doc3d = threeDDocuments.last()
+                // Load house-level asset definitions from root AssetDefinitions element
+                val assetDefNodes = xmlDoc.documentElement.getElementsByTagName("AssetDefinitions")
+                if (assetDefNodes.length > 0) {
+                    val topEl = assetDefNodes.item(0) as Element
+                    if (topEl.parentNode == xmlDoc.documentElement) {
+                        val kindAssetsNodes = topEl.getElementsByTagName("KindAssets")
+                        for (i in 0 until kindAssetsNodes.length) {
+                            val kaEl = kindAssetsNodes.item(i) as Element
+                            val kindIdx = kaEl.getAttribute("kind").toIntOrNull() ?: continue
+                            val defs = mutableListOf<AssetDefinition>()
+                            val defNodes2 = kaEl.getElementsByTagName("AssetDef")
+                            for (j in 0 until defNodes2.length) {
+                                val defEl = defNodes2.item(j) as Element
+                                val name = defEl.getAttribute("name")
+                                val limit = defEl.getAttribute("limit").toIntOrNull() ?: 0
+                                val w = defEl.getAttribute("width").toDoubleOrNull() ?: 0.0
+                                val h = defEl.getAttribute("height").toDoubleOrNull() ?: 0.0
+                                defs.add(AssetDefinition(name, limit, w, h))
+                            }
+                            if (defs.isNotEmpty()) doc3d.assetDefinitions[kindIdx] = defs
+                        }
+                    }
+                }
+
+                // Load floors - support new embedded format and old path-based format
+                val floorNodes = xmlDoc.getElementsByTagName("Floor")
+                var loadedAny = false
+                for (i in 0 until floorNodes.length) {
+                    val floorNode = floorNodes.item(i) as Element
+                    val height = floorNode.getAttribute("height").toInt()
+                    val draw = if (floorNode.hasAttribute("draw")) floorNode.getAttribute("draw").toBoolean() else true
+
+                    val floorDoc = FloorPlanDocument(this)
+                    floorDoc.ambientHouseDoc = doc3d
+
+                    if (floorNode.hasAttribute("path")) {
+                        // Old format: load from external file
+                        val path = floorNode.getAttribute("path")
+                        val floorName = if (floorNode.hasAttribute("name")) floorNode.getAttribute("name") else "Floor ${i + 1}"
+                        val floorFile = File(path)
+                        if (floorFile.exists()) {
+                            val floorXmlDoc = docBuilder.parse(floorFile)
+                            floorXmlDoc.documentElement.normalize()
+                            floorDoc.elements.addAll(parseFloorElements(floorXmlDoc))
+                            floorDoc.currentFile = floorFile
+                        } else {
+                            JOptionPane.showMessageDialog(null, "Floor plan file not found: $path")
+                            continue
+                        }
+                        doc3d.floors.add(ThreeDDocument.FloorData(floorName, height, draw, floorDoc))
+                    } else {
+                        // New embedded format: elements are children of the Floor node
+                        val floorName = if (floorNode.hasAttribute("name")) floorNode.getAttribute("name") else "Floor ${i + 1}"
+                        floorDoc.elements.addAll(parseFloorElements(floorNode))
+                        doc3d.floors.add(ThreeDDocument.FloorData(floorName, height, draw, floorDoc))
+                    }
+                    loadedAny = true
+                }
+
+                if (loadedAny) {
+                    doc3d.model = buildModel3D(doc3d)
                     doc3d.currentFile = file
                     doc3d.isModified = false
-                    doc3d.floors.clear()
-                    doc3d.floors.addAll(floorDataList)
-                    doc3d.window?.title = "3D House Model - ${file.name}"
-                    
+                    threeDDocuments.add(doc3d)
+                    val window = ThreeDWindow(this, doc3d)
+                    window.jMenuBar = createMenuBar()
+                    window.title = "3D House Model - ${file.name}"
+
                     // Restore window state for 3D document
                     if (savedState != null) {
                         doc3d.scale = savedState.scale
                         doc3d.rotationX = savedState.offsetX // offsetX stores rotationX for 3D docs
                         doc3d.rotationZ = savedState.offsetY // offsetY stores rotationZ for 3D docs
-                        doc3d.window?.let { window ->
-                            window.setSize(savedState.size.width, savedState.size.height)
+                        doc3d.window?.let { w ->
+                            w.setSize(savedState.size.width, savedState.size.height)
                             sidePanelWindow?.let { sideWindow ->
-                                window.setLocation(sideWindow.x + savedState.pos.x, sideWindow.y + savedState.pos.y)
+                                w.setLocation(sideWindow.x + savedState.pos.x, sideWindow.y + savedState.pos.y)
                             }
                         }
                     }
-                    
+
                     addToRecent(file)
                 }
                 return

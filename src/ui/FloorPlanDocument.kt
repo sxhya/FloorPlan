@@ -22,7 +22,18 @@ class FloorPlanDocument(val app: FloorPlanApp) {
     var offsetY = 0.0 // model cm
     var showDimensionLabels = false
     
-    var isModified = false
+    private var _isModified = false
+    var isModified: Boolean
+        get() = _isModified
+        set(value) {
+            _isModified = value
+            if (value) {
+                ambientHouseDoc?.let { houseDoc ->
+                    houseDoc.isModified = true
+                    houseDoc.window?.title = "3D House Model - ${houseDoc.currentFile?.name ?: "Untitled"}*"
+                }
+            }
+        }
     
     val kinds = mutableListOf<WallLayoutKind>(
         WallLayoutKind("Electrical", java.awt.Color.RED),
@@ -31,6 +42,19 @@ class FloorPlanDocument(val app: FloorPlanApp) {
     )
     /** Asset definitions per kind index: kindIndex → mutable list of AssetDefinition. */
     val assetDefinitions: MutableMap<Int, MutableList<AssetDefinition>> = mutableMapOf()
+
+    /** Reference to the house-level ThreeDDocument when this floor is embedded in a house plan. */
+    var ambientHouseDoc: ThreeDDocument? = null
+
+    /** Display name override (used when this floor is embedded and opened as an editor). */
+    var displayName: String? = null
+
+    /** Returns the effective kinds list: house-level if embedded, own otherwise. */
+    val effectiveKinds: MutableList<WallLayoutKind> get() = ambientHouseDoc?.kinds ?: kinds
+
+    /** Returns the effective asset definitions: house-level if embedded, own otherwise. */
+    val effectiveAssetDefinitions: MutableMap<Int, MutableList<AssetDefinition>> get() = ambientHouseDoc?.assetDefinitions ?: assetDefinitions
+
     val visibleKinds = mutableSetOf<Int>()
     var addingUtilityKind: Int? = null
 
@@ -304,7 +328,7 @@ class FloorPlanDocument(val app: FloorPlanApp) {
         return elements.filterIsInstance<Room>().find { it.getBounds().contains(rect) }
     }
 
-    private fun cloneElements(source: List<PlanElement>): List<PlanElement> {
+    internal fun cloneElements(source: List<PlanElement>): List<PlanElement> {
         try {
             val baos = java.io.ByteArrayOutputStream()
             val oos = java.io.ObjectOutputStream(baos)

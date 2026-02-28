@@ -105,7 +105,7 @@ class EditorWindow(val app: FloorPlanApp, val doc: FloorPlanDocument) : JFrame()
         val visibilityBtn = JButton("Visibility")
         visibilityBtn.addActionListener {
             val menu = JPopupMenu()
-            doc.kinds.forEachIndexed { index, kind ->
+            doc.effectiveKinds.forEachIndexed { index, kind ->
                 val item = JCheckBoxMenuItem(kind.name, doc.visibleKinds.contains(index))
                 item.addActionListener {
                     if (item.isSelected) {
@@ -132,10 +132,10 @@ class EditorWindow(val app: FloorPlanApp, val doc: FloorPlanDocument) : JFrame()
     }
 
     fun updateTitle() {
-        val baseTitle = if (doc.currentFile != null) {
-            "Floor Plan Editor - ${doc.currentFile!!.name}"
-        } else {
-            "Floor Plan Editor"
+        val baseTitle = when {
+            doc.currentFile != null -> "Floor Plan Editor - ${doc.currentFile!!.name}"
+            doc.displayName != null -> "Floor Plan Editor - ${doc.displayName}"
+            else -> "Floor Plan Editor"
         }
         title = if (doc.isModified) "$baseTitle *" else baseTitle
     }

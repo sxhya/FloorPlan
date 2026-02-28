@@ -785,7 +785,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             
                 doc.app.popAddUtilityMenu.isVisible = true
                 doc.app.popAddUtilityMenu.removeAll()
-                doc.kinds.forEachIndexed { index, kind ->
+                doc.effectiveKinds.forEachIndexed { index, kind ->
                     val item = JMenuItem(kind.name)
                     item.addActionListener {
                         doc.currentMode = AppMode.UTILITY_CONNECTION_ADDING
@@ -1159,7 +1159,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                 val s1x = doc.modelToScreen(p1.x, doc.offsetX)
                 val s1y = doc.modelToScreen(p1.y, doc.offsetY)
 
-                val kind = doc.kinds.getOrNull(doc.addingUtilityKind ?: -1)
+                val kind = doc.effectiveKinds.getOrNull(doc.addingUtilityKind ?: -1)
                 g2.color = kind?.color ?: Color.BLACK
                 g2.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0f, floatArrayOf(5f, 5f), 0f)
                 g2.drawLine(s1x, s1y, currentUtilityMousePos!!.x, currentUtilityMousePos!!.y)
@@ -1614,7 +1614,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     val s2x = doc.modelToScreen(p2.x, doc.offsetX)
                     val s2y = doc.modelToScreen(p2.y, doc.offsetY)
                     
-                    val kind = doc.kinds.getOrNull(conn.kind)
+                    val kind = doc.effectiveKinds.getOrNull(conn.kind)
                     g2.color = kind?.color ?: Color.BLACK
                     g2.stroke = BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 0f, floatArrayOf(5f, 5f), 0f)
                     g2.drawLine(s1x, s1y, s2x, s2y)
@@ -1634,7 +1634,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     val sx = doc.modelToScreen(coords.x, doc.offsetX)
                     val sy = doc.modelToScreen(coords.y, doc.offsetY)
 
-                    val kind = doc.kinds.getOrNull(p.kind)
+                    val kind = doc.effectiveKinds.getOrNull(p.kind)
                     g2.color = kind?.color ?: Color.BLACK
                     val r = 5
                     g2.fillOval(sx - r, sy - r, 2 * r, 2 * r)
