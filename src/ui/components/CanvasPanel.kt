@@ -142,7 +142,7 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                                 firstUtilityWall = pointInfo.second
                                 firstUtilityIsFront = pointInfo.third
                             } else {
-                                if (pointInfo.first != firstUtilityPoint) {
+                                if (pointInfo.first !== firstUtilityPoint) {
                                     // Finish connection
                                     val conn = UtilitiesConnection(
                                         firstUtilityPoint!!, firstUtilityWall!!, firstUtilityIsFront,
@@ -1148,10 +1148,20 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             stairs.forEach { drawElement(g2, it) }
             attachments.forEach { drawElement(g2, it) }
 
-            // Draw visible utility points
-            walls.forEach { wall ->
-                drawWallPoints(g2, wall, wall.frontLayout, true)
-                drawWallPoints(g2, wall, wall.backLayout, false)
+            // Draw visible utility points (only the topmost at each floor-plan X/Y position)
+            collectTopmostUtilityPoints(walls).forEach { (p, wall, isFront) ->
+                val isAddingThisKind = doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && p.kind == doc.addingUtilityKind
+                if (p.kind in doc.visibleKinds || isAddingThisKind) {
+                    val coords = wall.getFloorPlanCoords(p, isFront)
+                    val sx = doc.modelToScreen(coords.x, doc.offsetX)
+                    val sy = doc.modelToScreen(coords.y, doc.offsetY)
+                    val kind = doc.effectiveKinds.getOrNull(p.kind)
+                    g2.color = kind?.color ?: Color.BLACK
+                    val r = 5
+                    g2.fillOval(sx - r, sy - r, 2 * r, 2 * r)
+                    g2.color = Color.BLACK
+                    g2.drawOval(sx - r, sy - r, 2 * r, 2 * r)
+                }
             }
 
             if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && firstUtilityPoint != null && currentUtilityMousePos != null) {
@@ -1626,44 +1636,41 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
             g2.fillRect(sx, sy, sw, sh)
         }
 
-        private fun drawWallPoints(g2: Graphics2D, wall: Wall, layout: WallLayout, isFront: Boolean) {
-            layout.points.forEach { p ->
-                val isAddingThisKind = doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING && p.kind == doc.addingUtilityKind
-                if (p.kind in doc.visibleKinds || isAddingThisKind) {
-                    val coords = wall.getFloorPlanCoords(p, isFront)
-                    val sx = doc.modelToScreen(coords.x, doc.offsetX)
-                    val sy = doc.modelToScreen(coords.y, doc.offsetY)
-
-                    val kind = doc.effectiveKinds.getOrNull(p.kind)
-                    g2.color = kind?.color ?: Color.BLACK
-                    val r = 5
-                    g2.fillOval(sx - r, sy - r, 2 * r, 2 * r)
-                    g2.color = Color.BLACK
-                    g2.drawOval(sx - r, sy - r, 2 * r, 2 * r)
+        /**
+         * For each unique floor-plan (X, Y) position (rounded to nearest cm), keeps only the
+         * point with the largest Z value.  This is used both for rendering and hit-detection so
+         * that stacked points (same wall-position, different heights) show/interact only with the
+         * topmost one.
+         */
+        private fun collectTopmostUtilityPoints(walls: List<Wall>): List<Triple<WallLayoutPoint, Wall, Boolean>> {
+            val byPos = mutableMapOf<Pair<Int, Int>, Triple<WallLayoutPoint, Wall, Boolean>>()
+            for (wall in walls) {
+                for (isFront in listOf(true, false)) {
+                    val layout = if (isFront) wall.frontLayout else wall.backLayout
+                    for (p in layout.points) {
+                        val coords = wall.getFloorPlanCoords(p, isFront)
+                        val key = Pair(coords.x.roundToInt(), coords.y.roundToInt())
+                        val existing = byPos[key]
+                        if (existing == null || p.z > existing.first.z) {
+                            byPos[key] = Triple(p, wall, isFront)
+                        }
+                    }
                 }
             }
+            return byPos.values.toList()
         }
 
         private fun findWallPointUnderMouse(p: Point): Triple<WallLayoutPoint, Wall, Boolean>? {
             val walls = doc.elements.filterIsInstance<Wall>()
-            for (wall in walls) {
-                val resFront = findPointInLayout(p, wall, wall.frontLayout, true)
-                if (resFront != null) return Triple(resFront, wall, true)
-                val resBack = findPointInLayout(p, wall, wall.backLayout, false)
-                if (resBack != null) return Triple(resBack, wall, false)
-            }
-            return null
-        }
-
-        private fun findPointInLayout(p: Point, wall: Wall, layout: WallLayout, isFront: Boolean): WallLayoutPoint? {
-            val r = 10 // selection radius
-            for (wp in layout.points) {
+            val r = 10
+            val kindFilter = if (doc.currentMode == AppMode.UTILITY_CONNECTION_ADDING) doc.addingUtilityKind else null
+            return collectTopmostUtilityPoints(walls).firstOrNull { (wp, wall, isFront) ->
+                if (kindFilter != null && wp.kind != kindFilter) return@firstOrNull false
                 val coords = wall.getFloorPlanCoords(wp, isFront)
                 val sx = doc.modelToScreen(coords.x, doc.offsetX)
                 val sy = doc.modelToScreen(coords.y, doc.offsetY)
-                if (abs(sx - p.x) <= r && abs(sy - p.y) <= r) return wp
+                abs(sx - p.x) <= r && abs(sy - p.y) <= r
             }
-            return null
         }
 
 
