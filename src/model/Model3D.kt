@@ -77,7 +77,9 @@ data class Cylinder3D(
 data class Label3D(
     val position: Vector3D,
     val text: String,
-    val color: java.awt.Color
+    val color: java.awt.Color,
+    val isVertical: Boolean = false,  // true = wall extends along model Y axis
+    val isFront: Boolean = true       // false = back face of wall
 ) : Serializable
 
 class Model3D : Serializable {

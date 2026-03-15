@@ -1161,6 +1161,11 @@ class CanvasPanel(private val doc: FloorPlanDocument) : JPanel() {
                     g2.fillOval(sx - r, sy - r, 2 * r, 2 * r)
                     g2.color = Color.BLACK
                     g2.drawOval(sx - r, sy - r, 2 * r, 2 * r)
+                    if (p.name.isNotEmpty()) {
+                        g2.color = kind?.color ?: Color.BLACK
+                        val fm = g2.fontMetrics
+                        g2.drawString(p.name, sx + r + 2, sy + fm.ascent / 2)
+                    }
                 }
             }
 

@@ -1407,7 +1407,7 @@ class FloorPlanApp {
                             if (p.name.isNotEmpty()) {
                                 val pos = waypoint3D(p.x, p.z.toDouble(), isFront)
                                 val color = kinds.getOrNull(p.kind)?.color ?: java.awt.Color.WHITE
-                                model3d.labels.add(Label3D(pos, p.name, color))
+                                model3d.labels.add(Label3D(pos, p.name, color, isVertical, isFront))
                             }
                         }
                     }

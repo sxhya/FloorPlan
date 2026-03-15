@@ -724,10 +724,41 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         text.font = JFXFont.font("System", 20.0)
         text.fill = JFXColor.rgb(label.color.red, label.color.green, label.color.blue)
         // Position in FX space: model(x,y,z) -> FX(-x,-z,y)
+        // Apply a small epsilon offset along the wall normal to avoid Z-fighting.
+        // Normal direction (model space): isVertical=false → ±model_Y (FX_Z); isVertical=true → ±model_X (FX_X negated)
+        // epsSign: front = -1 (eps negative), back = +1 (eps positive)
+        val eps = 0.5
+        val epsSign = if (label.isFront) -1.0 else 1.0
+        // isVertical=false: offset along model_Y → FX_Z += epsSign * eps
+        // isVertical=true:  offset along model_X → FX_X -= epsSign * eps  (FX_X = -model_X)
+        val deltaX = if (label.isVertical) epsSign * eps else 0.0
+        val deltaY = if (!label.isVertical) epsSign * eps else 0.0
         val group = Group(text)
-        group.translateX = -label.position.x
+        group.translateX = -label.position.x - deltaX
         group.translateY = -label.position.z
-        group.translateZ = label.position.y
+        group.translateZ = label.position.y + deltaY
+
+        // Rotate label to lie in the wall plane and face the wall's outward normal.
+        // Default FX Text is in the XY plane facing -Z.
+        // Model-to-FX mapping: model_X -> FX -X, model_Y -> FX +Z, model_Z -> FX -Y
+        //
+        // Horizontal wall (isVertical=false), normal along ±model_Y = ∓FX_Z:
+        //   Front (isFront=true):  normal = -FX_Z  → default text faces -FX_Z ✓ no rotation
+        //   Back  (isFront=false): normal = +FX_Z  → rotate 180° around Y (mirrors text along X = back-face convention)
+        //
+        // Vertical wall (isVertical=true), normal along ±model_X = ∓FX_X:
+        //   Front (isFront=true):  normal = +FX_X  → rotate -90° around Y: -FX_Z → +FX_X
+        //   Back  (isFront=false): normal = -FX_X  → rotate +90° around Y: -FX_Z → -FX_X (mirrors text along wall)
+        val rotationAngle = when {
+            !label.isVertical && !label.isFront -> 180.0
+            label.isVertical && label.isFront   -> -90.0
+            label.isVertical && !label.isFront  -> 90.0
+            else                                -> 0.0  // horizontal front: no rotation
+        }
+        if (rotationAngle != 0.0) {
+            group.transforms.add(Rotate(rotationAngle, Rotate.Y_AXIS))
+        }
+
         return group
     }
 

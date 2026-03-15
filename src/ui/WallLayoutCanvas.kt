@@ -81,7 +81,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
                 var newZ = dp.z + dz
                 
                 // Constraints
-                val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+                val wallHeight = doc.getFloorHeight()
                 newX = newX.coerceIn(doc.wallStart, doc.wallEnd)
                 newZ = newZ.coerceIn(0.0, wallHeight)
 
@@ -116,7 +116,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val addPointItem = JMenuItem("Add point")
         addPointItem.addActionListener {
             val wallWidth = (doc.wallEnd - doc.wallStart)
-            val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+            val wallHeight = doc.getFloorHeight()
             
             val modelX = doc.screenToModel(e.x, doc.offsetX).coerceIn(doc.wallStart, doc.wallEnd)
             val modelZ = doc.screenToModel(e.y, doc.offsetY, true).coerceIn(0.0, wallHeight).roundToInt()
@@ -213,8 +213,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
         val pointsByKind = allPoints.groupBy { it.kind }
         if (pointsByKind.isEmpty()) return
 
-        val wallHeight = doc.app.getThreeDDocuments().firstOrNull()
-            ?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+        val wallHeight = doc.getFloorHeight()
 
         val openings = buildOpeningsForWall(doc.wall, doc.isVertical,
             doc.floorPlanDoc.elements.filter { it is PlanWindow || it is Door }
@@ -529,7 +528,7 @@ class WallLayoutCanvas(val doc: WallLayoutDocument) : JPanel() {
     }
 
     private fun drawWallBackground(g2: Graphics2D) {
-        val wallHeight = doc.app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+        val wallHeight = doc.getFloorHeight()
         
         val x1 = doc.modelToScreen(doc.wallStart, doc.offsetX)
         val x2 = doc.modelToScreen(doc.wallEnd, doc.offsetX)

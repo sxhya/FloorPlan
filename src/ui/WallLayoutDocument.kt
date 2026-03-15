@@ -55,7 +55,7 @@ class WallLayoutDocument(
         if (canvas.width <= 0 || canvas.height <= 0) return
 
         val wallWidth = (wallEnd - wallStart)
-        val wallHeight = app.getThreeDDocuments().firstOrNull()?.model?.getBounds()?.let { (it.second.z - it.first.z) } ?: 300.0
+        val wallHeight = getFloorHeight()
 
         val margin = 40.0 // pixels
         val availableWidth = canvas.width - 2 * margin
@@ -108,6 +108,12 @@ class WallLayoutDocument(
         offsetY += dyModel
     }
     
+    fun getFloorHeight(): Double =
+        app.getThreeDDocuments()
+            .firstOrNull { threeD -> threeD.floors.any { it.floorDoc === floorPlanDoc } }
+            ?.floors?.firstOrNull { it.floorDoc === floorPlanDoc }
+            ?.height?.toDouble() ?: 300.0
+
     val undoStack = mutableListOf<List<WallLayoutPoint>>()
     val redoStack = mutableListOf<List<WallLayoutPoint>>()
     val MAX_HISTORY = 10
