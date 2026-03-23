@@ -531,6 +531,11 @@ class FloorPlanApp {
         val create3DItem = JMenuItem("Create 3D model")
         create3DItem.addActionListener { showCreate3DDialog() }
         toolsMenu.add(create3DItem)
+
+        val statisticsItem = JMenuItem("Statistics")
+        statisticsItem.addActionListener { showStatisticsWindow() }
+        toolsMenu.add(statisticsItem)
+
         menuBar.add(toolsMenu)
         
         menuBars.add(menuBar)
@@ -547,6 +552,26 @@ class FloorPlanApp {
         toolsMenu.add(utilitiesMenu)
         
         return menuBar
+    }
+
+    private fun showStatisticsWindow() {
+        val doc = activeDocument
+        val win = activeWindow
+        when {
+            doc != null -> {
+                val floorTitle = doc.currentFile?.nameWithoutExtension ?: "Floor Plan"
+                ui.components.StatisticsWindow.forFloor(doc, floorTitle).isVisible = true
+            }
+            win is ThreeDWindow -> {
+                ui.components.StatisticsWindow.for3D(win.doc).isVisible = true
+            }
+            else -> JOptionPane.showMessageDialog(
+                activeWindow,
+                "Open a floor plan or 3D model to view statistics.",
+                "Statistics",
+                JOptionPane.INFORMATION_MESSAGE
+            )
+        }
     }
 
     private fun showCreate3DDialog() {

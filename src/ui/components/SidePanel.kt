@@ -17,6 +17,23 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         init {
             putClientProperty("terminateEditOnFocusLost", true)
         }
+
+        // Two-click selection model: first click selects the cell (showing spinner/combo
+        // decorations via the renderer); a second click on the already-selected cell opens
+        // the editor. This keeps selection and editing clearly separate.
+        override fun changeSelection(rowIndex: Int, columnIndex: Int, toggle: Boolean, extend: Boolean) {
+            val alreadySelected = !isUpdatingFields
+                && rowIndex == selectedRow
+                && columnIndex == selectedColumn
+                && !isEditing
+                && isCellEditable(rowIndex, columnIndex)
+            super.changeSelection(rowIndex, columnIndex, toggle, extend)
+            if (alreadySelected) {
+                editCellAt(rowIndex, columnIndex)
+                editorComponent?.requestFocusInWindow()
+            }
+        }
+
         // NOTE: Do NOT override tableChanged() to call stopCellEditing() here.
         // TableModelEvents fire synchronously inside JTable.editingStopped() → setValueAt(),
         // before removeEditor() clears the editing state. Calling stopCellEditing() from
@@ -41,7 +58,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
     private val dimensionTable = PropertyTable(dimensionTableModel)
 
     private val polygonPanel = JPanel(BorderLayout())
-    private val polygonTableModel = DefaultTableModel(arrayOf("Marker No", "X", "Y"), 0)
+    private val polygonTableModel = object : DefaultTableModel(arrayOf("Marker No", "X", "Y"), 0) {
+        override fun isCellEditable(row: Int, column: Int) = column != 0
+    }
     private val polygonTable = PropertyTable(polygonTableModel)
 
     private val threeDSidePanel = JPanel(BorderLayout())
@@ -95,6 +114,39 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         setupFloorPlanComboBox()
         threeDTable.columnModel.getColumn(2).cellRenderer = threeDTable.getDefaultRenderer(Boolean::class.javaObjectType)
         threeDTable.columnModel.getColumn(2).cellEditor = threeDTable.getDefaultEditor(Boolean::class.javaObjectType)
+
+        // Integer spinner for the Height (cm) column
+        val heightSpinner = JSpinner(SpinnerNumberModel(280, 1, 9999, 1))
+        val heightSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                heightSpinner.value = (value as? Int) ?: value?.toString()?.toIntOrNull() ?: 280
+                return heightSpinner
+            }
+            override fun getCellEditorValue(): Any? {
+                try { heightSpinner.commitEdit() } catch (e: Exception) { }
+                return heightSpinner.value as Int
+            }
+        }
+        (heightSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
+            try { heightSpinner.commitEdit() } catch (e: Exception) { }
+            if (threeDTable.isEditing) threeDTable.cellEditor?.stopCellEditing()
+        }
+        threeDTable.columnModel.getColumn(1).cellEditor = heightSpinnerEditor
+        threeDTable.rowHeight = maxOf(threeDTable.rowHeight, heightSpinner.preferredSize.height)
+
+        // Show spinner decoration on selected Height cells before the editor opens
+        val heightRenderSpinner = JSpinner(SpinnerNumberModel(280, 1, 9999, 1))
+        threeDTable.columnModel.getColumn(1).cellRenderer = object : TableCellRenderer {
+            private val defaultRenderer = threeDTable.getDefaultRenderer(Any::class.java)
+            override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
+                if (isSelected && table?.isCellEditable(row, column) == true) {
+                    heightRenderSpinner.value = (value as? Int) ?: value?.toString()?.toIntOrNull() ?: 280
+                    heightRenderSpinner.background = table?.selectionBackground
+                    return heightRenderSpinner
+                }
+                return defaultRenderer.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            }
+        }
 
         threeDTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
@@ -157,8 +209,57 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
         polygonPopup.add(removeMarkerItem)
 
         polygonTable.componentPopupMenu = polygonPopup
-        
+
+        // Deselect when clicking empty space or the non-editable Marker No column
+        polygonTable.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mousePressed(e: java.awt.event.MouseEvent) {
+                val row = polygonTable.rowAtPoint(e.point)
+                val col = polygonTable.columnAtPoint(e.point)
+                if (row == -1 || col == 0) {
+                    if (polygonTable.isEditing) polygonTable.cellEditor?.stopCellEditing()
+                    polygonTable.clearSelection()
+                }
+            }
+        })
+
         setupDimensionTableEditors()
+
+        // Integer spinner for polygon table X and Y columns
+        val polySpinner = JSpinner(SpinnerNumberModel(0, -99999, 99999, 1))
+        val polySpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
+            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
+                polySpinner.value = value?.toString()?.toIntOrNull() ?: 0
+                return polySpinner
+            }
+            override fun getCellEditorValue(): Any? {
+                try { polySpinner.commitEdit() } catch (e: Exception) { }
+                return polySpinner.value as Int
+            }
+        }
+        (polySpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
+            try { polySpinner.commitEdit() } catch (e: Exception) { }
+            if (polygonTable.isEditing) polygonTable.cellEditor?.stopCellEditing()
+            polygonTable.clearSelection()
+        }
+        polygonTable.columnModel.getColumn(1).cellEditor = polySpinnerEditor
+        polygonTable.columnModel.getColumn(2).cellEditor = polySpinnerEditor
+        polygonTable.rowHeight = maxOf(polygonTable.rowHeight, polySpinner.preferredSize.height)
+
+        // Render spinner decoration on selected X/Y cells (before the editor opens)
+        val polyRenderSpinner = JSpinner(SpinnerNumberModel(0, -99999, 99999, 1))
+        val polySpinnerRenderer = object : TableCellRenderer {
+            private val defaultRenderer = polygonTable.getDefaultRenderer(Any::class.java)
+            override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
+                if (isSelected && table?.isCellEditable(row, column) == true) {
+                    polyRenderSpinner.value = value?.toString()?.toIntOrNull() ?: 0
+                    polyRenderSpinner.background = table?.selectionBackground
+                    return polyRenderSpinner
+                }
+                return defaultRenderer.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            }
+        }
+        polygonTable.columnModel.getColumn(1).cellRenderer = polySpinnerRenderer
+        polygonTable.columnModel.getColumn(2).cellRenderer = polySpinnerRenderer
 
         dimensionTableModel.addTableModelListener { e ->
             if (!isUpdatingFields && e.type == javax.swing.event.TableModelEvent.UPDATE) {
@@ -468,53 +569,35 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
             override fun getCellEditorValue(): Any? = defaultTextField.text
         }
 
-        // Spinner for X (Double) — only active when editing a WallLayoutPoint
-        val xSpinner = JSpinner(SpinnerNumberModel(0.0, -99999.0, 99999.0, 1.0))
-        val xSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
+        // Single integer spinner shared by all numeric property cells in the dimension table.
+        // Using Int avoids fractional values; the wide range covers all practical coordinates.
+        val intSpinner = JSpinner(SpinnerNumberModel(0, -99999, 99999, 1))
+        val intSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
             override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
-                xSpinner.value = value?.toString()?.toDoubleOrNull() ?: 0.0
-                return xSpinner
+                intSpinner.value = value?.toString()?.toIntOrNull() ?: 0
+                return intSpinner
             }
             override fun getCellEditorValue(): Any? {
-                try { xSpinner.commitEdit() } catch (e: Exception) { /* keep current value */ }
-                return xSpinner.value
+                try { intSpinner.commitEdit() } catch (e: Exception) { /* keep current value */ }
+                return intSpinner.value as Int
             }
         }
-        (xSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
-            try { xSpinner.commitEdit() } catch (e: Exception) { /* ignore */ }
-            if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
-            dimensionTable.clearSelection()
-        }
-
-        // Spinner for Z (Int) — only active when editing a WallLayoutPoint
-        val zSpinner = JSpinner(SpinnerNumberModel(0, 0, 9999, 1))
-        val zSpinnerEditor = object : AbstractCellEditor(), TableCellEditor {
-            override fun getTableCellEditorComponent(table: JTable?, value: Any?, isSelected: Boolean, row: Int, column: Int): Component {
-                zSpinner.value = value?.toString()?.toIntOrNull() ?: 0
-                return zSpinner
-            }
-            override fun getCellEditorValue(): Any? {
-                try { zSpinner.commitEdit() } catch (e: Exception) { /* keep current value */ }
-                return zSpinner.value
-            }
-        }
-        (zSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
-            try { zSpinner.commitEdit() } catch (e: Exception) { /* ignore */ }
+        (intSpinner.editor as JSpinner.DefaultEditor).textField.addActionListener {
+            try { intSpinner.commitEdit() } catch (e: Exception) { /* ignore */ }
             if (dimensionTable.isEditing) dimensionTable.cellEditor?.stopCellEditing()
             dimensionTable.clearSelection()
         }
 
         // Ensure the table rows are tall enough to fully paint the spinner up/down buttons.
         // The default row height (16-18px) clips them; use the spinner's own preferred height.
-        dimensionTable.rowHeight = maxOf(dimensionTable.rowHeight, xSpinner.preferredSize.height)
+        dimensionTable.rowHeight = maxOf(dimensionTable.rowHeight, intSpinner.preferredSize.height)
 
         // Immediately repaint the table when a spinner editor gains focus so the
         // selected-row highlight updates without waiting for the next Swing repaint pass.
         val spinnerFocusRepaint = object : java.awt.event.FocusAdapter() {
             override fun focusGained(e: java.awt.event.FocusEvent) = dimensionTable.repaint()
         }
-        (xSpinner.editor as JSpinner.DefaultEditor).textField.addFocusListener(spinnerFocusRepaint)
-        (zSpinner.editor as JSpinner.DefaultEditor).textField.addFocusListener(spinnerFocusRepaint)
+        (intSpinner.editor as JSpinner.DefaultEditor).textField.addFocusListener(spinnerFocusRepaint)
 
         // Cap the "Property" column width so the "Value" column gets enough room for comboboxes.
         dimensionTable.columnModel.getColumn(0).maxWidth = 110
@@ -546,8 +629,9 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                     "Direction along X" -> directionEditor
                     "Kind" -> kindEditor
                     "Start Point", "End Point" -> pointEditor
-                    "X" -> if (activeWallLayoutDoc != null) xSpinnerEditor else defaultEditor
-                    "Z" -> if (activeWallLayoutDoc != null) zSpinnerEditor else defaultEditor
+                    "X", "Y", "Plan width", "Plan height",
+                    "Vertical height", "Sill elevation",
+                    "Floor thickness", "Z-offset", "Total raise", "Z" -> intSpinnerEditor
                     else -> defaultEditor
                 }
                 return currentEditor!!.getTableCellEditorComponent(table, value, isSelected, row, column)
@@ -579,17 +663,23 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
 
         dimensionTable.columnModel.getColumn(1).cellEditor = outerEditor
 
+        // Spinner used only for rendering selected integer cells (separate from the editor
+        // instance to avoid layout state shared between paint and edit passes).
+        val renderIntSpinner = JSpinner(SpinnerNumberModel(0, -99999, 99999, 1))
+        // Combo used for rendering selected Kind/Point cells (shows dropdown arrow decoration)
+        val renderCombo = JComboBox<Any>()
+
         dimensionTable.columnModel.getColumn(1).cellRenderer = object : TableCellRenderer {
             private val defaultRenderer = dimensionTable.getDefaultRenderer(Any::class.java)
             override fun getTableCellRendererComponent(table: JTable?, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int): Component {
                 val propName = table?.getValueAt(row, 0)?.toString()?.replace(":", "")?.trim()
+                val editable = table?.isCellEditable(row, column) == true
 
-                // Render Direction/Position as comboboxes so the display text is correct
+                // Direction/Position always render as comboboxes so the display text is correct
                 // (true/false → "Along X"/"Along Y", enum → name).
                 // "Kind" is NOT rendered via the shared kindComboBox: using a shared comboBox
                 // instance as both editor and renderer causes the internal layout to become
                 // stale after the first edit, pushing the dropdown button off-centre.
-                // Plain-text rendering via the default renderer is correct and simpler.
                 if (propName == "Direction along X" || propName == "Window Position") {
                     val comboBox = if (propName == "Direction along X") directionComboBox else windowPositionComboBox
                     comboBox.selectedItem = value
@@ -597,6 +687,27 @@ class SidePanel(private val app: FloorPlanApp) : JPanel() {
                     comboBox.foreground = if (isSelected) table?.selectionForeground else table?.foreground
                     comboBox.font = table?.font
                     return comboBox
+                }
+
+                // For selected editable cells, show spinner/combo decorations to hint that
+                // a second click will open the editor — without actually entering edit mode.
+                if (isSelected && editable) {
+                    when (propName) {
+                        "X", "Y", "Plan width", "Plan height", "Vertical height", "Sill elevation",
+                        "Floor thickness", "Z-offset", "Total raise", "Z" -> {
+                            renderIntSpinner.value = value?.toString()?.toIntOrNull() ?: 0
+                            renderIntSpinner.background = table?.selectionBackground
+                            return renderIntSpinner
+                        }
+                        "Kind", "Start Point", "End Point" -> {
+                            renderCombo.removeAllItems()
+                            renderCombo.addItem(value)
+                            renderCombo.selectedItem = value
+                            renderCombo.background = table?.selectionBackground
+                            renderCombo.foreground = table?.selectionForeground
+                            return renderCombo
+                        }
+                    }
                 }
 
                 return defaultRenderer.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
