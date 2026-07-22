@@ -5,7 +5,10 @@ import javafx.embed.swing.JFXPanel
 import javafx.geometry.Point3D
 import javafx.scene.*
 import javafx.scene.paint.Color as JFXColor
+import javafx.scene.paint.CycleMethod
+import javafx.scene.paint.LinearGradient
 import javafx.scene.paint.PhongMaterial
+import javafx.scene.paint.Stop
 import javafx.scene.shape.Box
 import javafx.scene.shape.CullFace
 import javafx.scene.shape.Cylinder
@@ -48,6 +51,7 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     private var cameraTranslate: Translate? = null
     private var ambientLight: AmbientLight? = null
     private var windowAmbientLight: AmbientLight? = null  // Always-on light for windows
+    private var daySunGroup: Group? = null  // Daytime directional "sun" rig (key/fill/back)
     
     private var lastMouseX = 0.0
     private var lastMouseY = 0.0
@@ -93,16 +97,23 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val rootGroup = Group()
         root = rootGroup
         val scene = Scene(rootGroup, 1000.0, 700.0, true, SceneAntialiasing.BALANCED)
-        scene.fill = JFXColor.SKYBLUE
+        // Vertical gradient sky (deeper blue overhead, paler at the horizon) instead of a
+        // flat fill. Swapped for a night sky in updateLighting().
+        scene.fill = LinearGradient(
+            0.0, 0.0, 0.0, 1.0, true, CycleMethod.NO_CYCLE,
+            Stop(0.0, JFXColor.rgb(120, 170, 225)),
+            Stop(1.0, JFXColor.rgb(205, 226, 245))
+        )
         
         val mGroup = Group()
         modelGroup = mGroup
         rootGroup.children.add(mGroup)
         
-        // Separate group for windows - will have its own always-on ambient light
+        // Separate group for windows (translucent glass). It is added to the root LAST
+        // (further below) so it renders after all opaque geometry, which is what JavaFX
+        // needs for transparency to composite correctly.
         val wGroup = Group()
         windowGroup = wGroup
-        rootGroup.children.add(wGroup)
 
         // Separate group for utility pipe cylinders
         val ugGroup = Group()
@@ -114,8 +125,12 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         labelsGroup = lgGroup
         rootGroup.children.add(lgGroup)
         
-        // Always-on ambient light for windows so they remain visible regardless of daylight setting
-        val wAmbient = AmbientLight(JFXColor.WHITE)
+        // Always-on ambient light so windows stay visible regardless of the daylight setting.
+        // IMPORTANT: in JavaFX a light illuminates the WHOLE scene unless its scope is set -
+        // being parented to wGroup does not restrict it. We therefore scope it to the window
+        // group explicitly; otherwise it washes out the entire house and breaks night mode.
+        val wAmbient = AmbientLight(JFXColor.rgb(55, 62, 72))
+        wAmbient.scope.setAll(wGroup)
         windowAmbientLight = wAmbient
         wGroup.children.add(wAmbient)
         
@@ -128,12 +143,22 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val lsGroup = Group()
         lightSpheresGroup = lsGroup
         rootGroup.children.add(lsGroup)
-        
+
+        // Keep the light-marker spheres self-lit (bright) regardless of scene lighting, via a
+        // dedicated ambient scoped to just this group. Without it the markers would go dark at
+        // night (the room point light sits at the sphere centre, so it never lights its surface).
+        val markerAmbient = AmbientLight(JFXColor.rgb(255, 240, 200))
+        markerAmbient.scope.setAll(lsGroup)
+        lsGroup.children.add(markerAmbient)
+
         // Floor grid group
         val fgGroup = Group()
         floorGridGroup = fgGroup
         rootGroup.children.add(fgGroup)
-        
+
+        // Add the translucent window group last so it composites over all opaque geometry.
+        rootGroup.children.add(wGroup)
+
         val cam = PerspectiveCamera(true)
         camera = cam
         cam.nearClip = 0.1
@@ -157,11 +182,35 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         rootGroup.children.add(cXform)
         scene.camera = cam
         
-        // Add a white ambient light to make the scene visible without directional light sources.
-        // This ensures the model is visible with its diffuse colors and isn't affected by rotation.
-        val al = AmbientLight(JFXColor.WHITE)
+        // Soft global ambient fill. Kept LOW (not white) so the directional "sun" lights below
+        // can create a visible light-to-shadow gradient - that gradient is what gives surfaces
+        // their sense of form. A pure white ambient would flatten everything.
+        val al = AmbientLight(JFXColor.rgb(90, 92, 100))
         ambientLight = al
         rootGroup.children.add(al)
+
+        // Daytime directional rig. JavaFX 17 has no DirectionalLight, so we emulate parallel
+        // "sun" rays with distant PointLights (no attenuation => effectively directional).
+        // NOTE: JavaFX renders at most 3 point lights per mesh, so this rig uses exactly 3.
+        // The room lamps are OFF (group hidden) in day mode, so they don't compete for slots.
+        // Colours are kept below pure white so a fully-lit face approaches white while a face
+        // turned away stays visibly darker. FX "up" is -Y (model +Z maps to FX -Y).
+        val sun = Group()
+        daySunGroup = sun
+        fun sunLight(c: JFXColor, x: Double, y: Double, z: Double) = PointLight(c).apply {
+            maxRange = Double.MAX_VALUE
+            translateX = x; translateY = y; translateZ = z
+            // Keep the harsh directional light OFF the glass: an empty scope + this exclusion
+            // means the light affects everything except the window group, so panes stay clear
+            // and translucent instead of catching a bright specular wash that reads as opaque.
+            exclusionScope.setAll(wGroup)
+        }
+        sun.children.addAll(
+            sunLight(JFXColor.rgb(205, 198, 182), -8000.0, -12000.0, -6000.0),  // warm key, high front-left
+            sunLight(JFXColor.rgb(95, 108, 130),   9000.0,  -4000.0,  7000.0),  // cool fill, opposite side
+            sunLight(JFXColor.rgb(75, 78, 88),     3000.0, -10000.0,  9000.0)   // back/rim from above
+        )
+        rootGroup.children.add(sun)
         
         updateModel()
         updateCamera()
@@ -489,57 +538,110 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     }
 
     fun updateModel() {
-        val regularMeshViews = doc.model.rects.map { rect ->
+        // Opaque geometry only. Windows are translucent and rendered separately in windowGroup;
+        // previously they were also added here, so every pane was drawn twice (z-fighting).
+        val opaqueRects = doc.model.rects.filter { !it.isWindow }
+        val regularMeshViews = opaqueRects.map { rect ->
             createRectMeshView(rect)
         }
         val triangleMeshViews = doc.model.triangles.map { tri ->
             createTriangleMeshView(tri)
         }
-        
+        val windowRects = doc.model.rects.filter { it.isWindow }
+        val windowMeshViews = windowRects.map { rect ->
+            createRectMeshView(rect)
+        }
+
         Platform.runLater {
             modelGroup?.children?.clear()
             modelGroup?.children?.addAll(regularMeshViews)
             modelGroup?.children?.addAll(triangleMeshViews)
-            
-            // Clear windows
+
+            // Windows live only in windowGroup (translucent, own scoped ambient)
             windowGroup?.children?.removeIf { it !is AmbientLight }
-            
-            // Add window frames to windowGroup
-            val windowMeshViews = doc.model.rects.filter { it.isWindow }.map { rect ->
-                createRectMeshView(rect)
-            }
             windowGroup?.children?.addAll(windowMeshViews)
-            
-            // Clear and rebuild room lights group
+
+            // Clear and rebuild room lights group (keep the scoped marker ambient in lsGroup)
             roomLightsGroup?.children?.clear()
-            lightSpheresGroup?.children?.clear()
-            
-            // Add point lights at room centers and yellow spheres for night mode
+            lightSpheresGroup?.children?.removeIf { it !is AmbientLight }
+
+            // Add a warm point light + a glowing marker sphere at each room centre.
+            val roomLights = mutableListOf<PointLight>()
             doc.model.lightPositions.forEach { pos ->
                 // Mapping: Model(x, y, z) -> FX(-x, -z, y) with X mirrored
                 val fxX = -pos.x
                 val fxY = -pos.z
                 val fxZ = pos.y
-                
-                // Internal room light - omnidirectional (no range limit)
-                val light = PointLight(JFXColor.WHITE)
+
+                // Warm "lamp" colour with gentle distance falloff, so it reads as a fixture and
+                // its (shadowless) spill through walls stays localised instead of flooding the house.
+                val light = PointLight(JFXColor.rgb(255, 244, 214))
                 light.translateX = fxX
                 light.translateY = fxY
                 light.translateZ = fxZ
-                light.maxRange = Double.MAX_VALUE
+                light.linearAttenuation = 0.0018
+                light.maxRange = 900.0
                 roomLightsGroup?.children?.add(light)
-                
-                // Yellow sphere to mark light position (visible in night mode)
+                roomLights.add(light)
+
+                // Glowing bulb marker at the light position (visible in night mode)
                 val sphere = Sphere(10.0)
-                val yellowMaterial = PhongMaterial(JFXColor.YELLOW)
-                yellowMaterial.specularColor = JFXColor.WHITE
-                sphere.material = yellowMaterial
+                val bulbMaterial = PhongMaterial(JFXColor.rgb(255, 240, 200))
+                bulbMaterial.specularColor = JFXColor.WHITE
+                sphere.material = bulbMaterial
                 sphere.translateX = fxX
                 sphere.translateY = fxY
                 sphere.translateZ = fxZ
                 lightSpheresGroup?.children?.add(sphere)
             }
-            
+
+            // JavaFX renders at most 3 point lights per mesh, and a light's "affects" test
+            // ignores range/attenuation (it is purely scope + on/off). With many room lamps,
+            // leaving them universal would mean only the first 3 in the scene light anything
+            // and every other room stays black. So we scope each surface to its NEAREST lamp:
+            // each mesh is then lit by exactly one point light - always within the cap, and
+            // every room is lit. (Attenuation still shapes the falloff within the room.)
+            if (roomLights.isNotEmpty()) {
+                val positions = doc.model.lightPositions
+                val scopeLists = Array(roomLights.size) { mutableListOf<Node>() }
+                fun assignNearest(node: Node, cx: Double, cy: Double, cz: Double) {
+                    var best = 0
+                    var bestD = Double.MAX_VALUE
+                    for (i in positions.indices) {
+                        val p = positions[i]
+                        val dx = p.x - cx; val dy = p.y - cy; val dz = p.z - cz
+                        val d = dx * dx + dy * dy + dz * dz
+                        if (d < bestD) { bestD = d; best = i }
+                    }
+                    scopeLists[best].add(node)
+                }
+                opaqueRects.forEachIndexed { i, r ->
+                    assignNearest(
+                        regularMeshViews[i],
+                        (r.v1.x + r.v2.x + r.v3.x + r.v4.x) / 4.0,
+                        (r.v1.y + r.v2.y + r.v3.y + r.v4.y) / 4.0,
+                        (r.v1.z + r.v2.z + r.v3.z + r.v4.z) / 4.0
+                    )
+                }
+                doc.model.triangles.forEachIndexed { i, t ->
+                    assignNearest(
+                        triangleMeshViews[i],
+                        (t.v1.x + t.v2.x + t.v3.x) / 3.0,
+                        (t.v1.y + t.v2.y + t.v3.y) / 3.0,
+                        (t.v1.z + t.v2.z + t.v3.z) / 3.0
+                    )
+                }
+                roomLights.forEachIndexed { i, light ->
+                    // A light with an EMPTY scope would revert to universal (lighting everything
+                    // and eating a slot on every mesh), so turn off any lamp that got no surfaces.
+                    if (scopeLists[i].isEmpty()) {
+                        light.isVisible = false
+                    } else {
+                        light.scope.setAll(scopeLists[i])
+                    }
+                }
+            }
+
             // Create floor grid at Z=0 (in absolute model coordinates, not centered)
             floorGridGroup?.children?.clear()
             val bounds = doc.model.getBounds()
@@ -627,15 +729,27 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
     fun updateLighting() {
         Platform.runLater {
             if (doc.isDayMode) {
-                // Day mode: ambient light on, room lights off, no spheres
-                ambientLight?.color = JFXColor.WHITE
+                // Day: soft ambient fill + directional sun rig; room lamps and markers off.
+                ambientLight?.color = JFXColor.rgb(90, 92, 100)
+                daySunGroup?.isVisible = true
                 roomLightsGroup?.isVisible = false
                 lightSpheresGroup?.isVisible = false
+                fxPanel.scene?.fill = LinearGradient(
+                    0.0, 0.0, 0.0, 1.0, true, CycleMethod.NO_CYCLE,
+                    Stop(0.0, JFXColor.rgb(120, 170, 225)),
+                    Stop(1.0, JFXColor.rgb(205, 226, 245))
+                )
             } else {
-                // Night mode: dim ambient, room lights on, show yellow spheres
-                ambientLight?.color = JFXColor.rgb(30, 30, 40)  // Very dim ambient
+                // Night: sun off, ambient near-black so only the room lamps illuminate.
+                ambientLight?.color = JFXColor.rgb(12, 12, 20)
+                daySunGroup?.isVisible = false
                 roomLightsGroup?.isVisible = true
                 lightSpheresGroup?.isVisible = true
+                fxPanel.scene?.fill = LinearGradient(
+                    0.0, 0.0, 0.0, 1.0, true, CycleMethod.NO_CYCLE,
+                    Stop(0.0, JFXColor.rgb(8, 10, 24)),
+                    Stop(1.0, JFXColor.rgb(30, 34, 55))
+                )
             }
         }
     }
@@ -669,15 +783,22 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val awtColor = rect.color
         val fxColor = JFXColor.rgb(awtColor.red, awtColor.green, awtColor.blue, awtColor.alpha / 255.0)
         material.diffuseColor = fxColor
-        material.specularColor = JFXColor.BLACK
-        // Windows are added to a separate group with their own always-on ambient light,
-        // so they remain visible regardless of the daylight setting
+        if (rect.isWindow) {
+            // Glass is deliberately excluded from the directional sun rig (see setupFXScene) so
+            // it reads as clear, translucent glazing rather than a specular-blown white panel.
+            // Only a faint cool sheen remains. Windows keep their own scoped ambient for night.
+            material.specularColor = JFXColor.rgb(60, 70, 85)
+            material.specularPower = 32.0
+        } else {
+            // Subtle sheen instead of dead black, so lit surfaces catch a faint highlight.
+            material.specularColor = JFXColor.rgb(35, 35, 35)
+        }
         meshView.material = material
         meshView.cullFace = CullFace.NONE
-        
+
         return meshView
     }
-    
+
     private fun createCylinderNode(cyl: Cylinder3D): Node {
         val dx = cyl.end.x - cyl.start.x
         val dy = cyl.end.y - cyl.start.y
@@ -788,7 +909,8 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
         val awtColor = tri.color
         val fxColor = JFXColor.rgb(awtColor.red, awtColor.green, awtColor.blue, awtColor.alpha / 255.0)
         material.diffuseColor = fxColor
-        material.specularColor = JFXColor.BLACK
+        // Subtle sheen instead of dead black, so lit surfaces catch a faint highlight.
+        material.specularColor = JFXColor.rgb(35, 35, 35)
         meshView.material = material
         meshView.cullFace = CullFace.NONE
         
@@ -915,12 +1037,14 @@ class ThreeDPanel(private val doc: ThreeDDocument) : JPanel() {
             windowGroup?.children?.clear()
             utilitiesGroup?.children?.clear()
             roomLightsGroup?.children?.clear()
+            daySunGroup?.children?.clear()
             root = null
             modelGroup = null
             windowGroup = null
             utilitiesGroup = null
             labelsGroup = null
             roomLightsGroup = null
+            daySunGroup = null
             camera = null
             cameraXform = null
             ambientLight = null

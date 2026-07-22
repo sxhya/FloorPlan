@@ -654,18 +654,6 @@ class FloorPlanApp {
         dialog.isVisible = true
     }
 
-    private fun areAdjacentRooms(r1: Room, r2: Room): Boolean {
-        val rect1 = r1.getBounds()
-        val rect2 = r2.getBounds()
-        if (rect1.y < rect2.y + rect2.height && rect1.y + rect1.height > rect2.y) {
-            if (rect1.x == rect2.x + rect2.width || rect2.x == rect1.x + rect1.width) return true
-        }
-        if (rect1.x < rect2.x + rect2.width && rect1.x + rect1.width > rect2.x) {
-            if (rect1.y == rect2.y + rect2.height || rect2.y == rect1.y + rect1.height) return true
-        }
-        return false
-    }
-    
     private fun isPolygonRoomDockedToRoom(pr: PolygonRoom, room: Room): Boolean {
         // Check if polygon room shares a horizontal or vertical edge with the room
         val roomBounds = room.getBounds()
@@ -890,47 +878,21 @@ class FloorPlanApp {
             val floorHeight = floorEntry.height.toDouble()
             val roomsOnFloor = floorEntry.floorDoc.elements.filterIsInstance<Room>()
 
-            // Compute light positions based on dockedness components
-            val roomsWithoutOffset = roomsOnFloor.filter { it.zOffset == 0 }
-            if (roomsWithoutOffset.isNotEmpty()) {
-                val centerZ = currentZ + floorHeight / 2.0
-                val adjacency = mutableMapOf<Room, MutableSet<Room>>()
-                for (i in roomsWithoutOffset.indices) {
-                    for (j in i + 1 until roomsWithoutOffset.size) {
-                        val r1 = roomsWithoutOffset[i]
-                        val r2 = roomsWithoutOffset[j]
-                        if (areAdjacentRooms(r1, r2)) {
-                            adjacency.getOrPut(r1) { mutableSetOf() }.add(r2)
-                            adjacency.getOrPut(r2) { mutableSetOf() }.add(r1)
-                        }
-                    }
-                }
-
-                val visited = mutableSetOf<Room>()
-                for (room in roomsWithoutOffset) {
-                    if (room !in visited) {
-                        val component = mutableListOf<Room>()
-                        val queue: java.util.Queue<Room> = java.util.LinkedList()
-                        queue.add(room)
-                        visited.add(room)
-                        while (queue.isNotEmpty()) {
-                            val r = queue.poll()
-                            component.add(r)
-                            adjacency[r]?.forEach { neighbor ->
-                                if (neighbor !in visited) {
-                                    visited.add(neighbor)
-                                    queue.add(neighbor)
-                                }
-                            }
-                        }
-
-                        val largestRoom = component.maxByOrNull { it.width.toDouble() * it.height.toDouble() }
-                        if (largestRoom != null) {
-                            val centerX = largestRoom.x.toDouble() + largestRoom.width.toDouble() / 2.0
-                            val centerY = largestRoom.y.toDouble() + largestRoom.height.toDouble() / 2.0
-                            model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
-                        }
-                    }
+            // Place one light at the centre of every room on this floor, so no room is left
+            // dark at night. (Rooms were previously merged into "docked" clusters that shared
+            // a single lamp, which left enclosed rooms - those sharing only a wall - unlit.
+            // The 3D view scopes each surface to its nearest lamp, so many lamps are fine.)
+            val centerZ = currentZ + floorHeight / 2.0
+            for (room in roomsOnFloor.filter { it.zOffset == 0 }) {
+                val centerX = room.x.toDouble() + room.width.toDouble() / 2.0
+                val centerY = room.y.toDouble() + room.height.toDouble() / 2.0
+                model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
+            }
+            for (poly in floorEntry.floorDoc.elements.filterIsInstance<PolygonRoom>().filter { it.zOffset == 0 }) {
+                if (poly.vertices.isNotEmpty()) {
+                    val centerX = poly.vertices.sumOf { it.x.toDouble() } / poly.vertices.size
+                    val centerY = poly.vertices.sumOf { it.y.toDouble() } / poly.vertices.size
+                    model3d.lightPositions.add(Vector3D(centerX, centerY, centerZ))
                 }
             }
 
@@ -940,7 +902,7 @@ class FloorPlanApp {
                 currentZ += floorHeight
                 continue
             }
-            val wallColor = Color.DARK_GRAY
+            val wallColor = Color(140, 138, 135)  // Light warm gray so lit walls read brighter
             val floorAlpha = 255
 
             for (el in floorEntry.floorDoc.elements) {
@@ -1110,7 +1072,7 @@ class FloorPlanApp {
 
                                     // Generate window frame for windows
                                     if (op is PlanWindow) {
-                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowColor = Color(160, 200, 230, 55) // Translucent glass tint
                                         val windowPos = op.windowPosition
                                         
                                         // Determine which edge to place the window frame based on WindowPosition
@@ -1147,7 +1109,7 @@ class FloorPlanApp {
 
                                     // Generate window frame for windows
                                     if (op is PlanWindow) {
-                                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                                        val windowColor = Color(160, 200, 230, 55) // Translucent glass tint
                                         val windowPos = op.windowPosition
                                         
                                         // Determine which edge to place the window frame based on WindowPosition
@@ -1173,7 +1135,7 @@ class FloorPlanApp {
                     is PlanWindow -> {
                         // Free-standing window - generate window frame
                         val isVertical = el.width < el.height
-                        val windowColor = Color(100, 150, 255, 100) // Semi-transparent bluish
+                        val windowColor = Color(160, 200, 230, 55) // Translucent glass tint
                         val windowPos = el.windowPosition
                         
                         val x1 = el.x.toDouble()
